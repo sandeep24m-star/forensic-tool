@@ -1,0 +1,6 @@
+streamlit
+pandas
+plotly
+textblob
+pdfplumber
+openpyxl
