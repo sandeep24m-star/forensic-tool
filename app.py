@@ -8,7 +8,7 @@ import re
 # --- Page Config ---
 st.set_page_config(page_title="Forensic Engine Ultimate", layout="wide")
 st.title("🕵️‍♂️ Forensic Risk Engine: Auto-Adaptive")
-st.markdown("**Methodology:** Adaptive grouping (Binary vs Traffic Light) with Detailed Interpretation.")
+st.markdown("**Methodology:** Adaptive grouping (Binary vs Traffic Light) with Auto-Column Detection.")
 
 # --- Sidebar ---
 with st.sidebar:
@@ -39,12 +39,73 @@ def find_value_in_text(text, keywords):
             except: continue
     return 0.0
 
+# --- Helper: Smart Column Mapper (RESTORED) ---
+def smart_map_columns(df):
+    # Dictionary of required standard names vs possible variations in user file
+    mapping_rules = {
+        'Company': ['company', 'entity', 'name', 'firm'],
+        'Pledge_Pct': ['pledge', 'encumbered', 'promoter pledge', 'pledged'],
+        'Sales': ['sales', 'revenue', 'turnover', 'income', 'top line'],
+        'Receivables': ['receivables', 'debtors', 'trade receivables', 'accounts receivable'],
+        'Inventory': ['inventory', 'stock', 'inventories'],
+        'CFO': ['cfo', 'operating cash', 'cash from operations', 'cash flow from operating'],
+        'EBITDA': ['ebitda', 'operating profit', 'pbit', 'profit before interest'],
+        'Total_Assets': ['total assets', 'balance sheet total', 'assets'],
+        'Non_Current_Assets': ['non current assets', 'fixed assets', 'long term assets'],
+        'RPT_Vol': ['rpt', 'related party', 'related transaction']
+    }
+    
+    # Create a new mapping dictionary
+    new_columns = {}
+    found_cols = []
+    
+    st.write("---")
+    st.markdown("### 🧬 Auto-Column Detection")
+    st.caption("The tool is scanning your Excel headers to match required fields...")
+    
+    cols_ui = st.columns(4)
+    
+    # Iterate through rules and try to find matches
+    for i, (standard_name, variations) in enumerate(mapping_rules.items()):
+        match_found = None
+        # Look for exact or partial matches
+        for col in df.columns:
+            if any(v in col.lower() for v in variations):
+                match_found = col
+                break
+        
+        # If no match found, try to use the standard name if it exists, else default to first col or 0
+        if not match_found and standard_name in df.columns:
+            match_found = standard_name
+            
+        # Allow user to override the auto-detection
+        with cols_ui[i % 4]:
+            selected = st.selectbox(
+                f"Map to '{standard_name}'", 
+                options=["(Select Column)"] + list(df.columns),
+                index=list(df.columns).index(match_found) + 1 if match_found else 0,
+                key=f"map_{standard_name}"
+            )
+            
+            if selected != "(Select Column)":
+                new_columns[selected] = standard_name
+                found_cols.append(standard_name)
+
+    # Rename and return
+    if new_columns:
+        df_mapped = df.rename(columns=new_columns)
+        # Add missing columns as 0 to prevent errors
+        for req in mapping_rules.keys():
+            if req not in df_mapped.columns:
+                df_mapped[req] = 0
+        return df_mapped
+    return df
+
 # --- Helper: Adaptive Risk Calculation & Narrative ---
 def calculate_risk(df):
     # 1. Clean Data
     cols = ['Sales', 'Receivables', 'Inventory', 'CFO', 'EBITDA', 'Pledge_Pct', 'Total_Assets', 'Non_Current_Assets', 'RPT_Vol']
     for c in cols:
-        if c not in df.columns: df[c] = 0
         df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
     # 2. Calculate Ratios
@@ -68,7 +129,7 @@ def calculate_risk(df):
         df['Risk_Group'] = df['Pledge_Pct'].apply(get_3_buckets)
         grouping_method = "Traffic Light (Large Sample Protocol)"
 
-    # 4. Scoring & Narrative Logic (Restored)
+    # 4. Scoring & Narrative Logic
     def get_detailed_analysis(row):
         score = 0
         obs = []
@@ -155,15 +216,14 @@ if app_mode == "1. Quantitative Forensic Scorecard":
 
     # --- OPTION B: EXCEL UPLOAD ---
     elif input_type == "📁 Upload Excel (Batch Analysis)":
-        st.write("Upload your Excel file. The tool will auto-detect sample size and choose the grouping method.")
+        st.write("Upload your Excel file. The tool will auto-detect columns matching 'Sales', 'Debtors', 'Pledge', etc.")
         up_file = st.file_uploader("Upload Excel/CSV", type=['xlsx', 'csv'])
         if up_file:
-            if up_file.name.endswith('.csv'): df_in = pd.read_csv(up_file)
-            else: df_in = pd.read_excel(up_file)
-            req_cols = ['Company', 'Pledge_Pct', 'Sales', 'Receivables', 'CFO', 'EBITDA']
-            if not all(c in df_in.columns for c in req_cols):
-                st.error(f"Missing columns. Required: {req_cols}")
-                df_in = None
+            if up_file.name.endswith('.csv'): raw_df = pd.read_csv(up_file)
+            else: raw_df = pd.read_excel(up_file)
+            
+            # RUN SMART MAPPER
+            df_in = smart_map_columns(raw_df)
 
     # --- RUN ANALYSIS ---
     if st.button("Run Forensic Analysis") and df_in is not None:
@@ -197,29 +257,23 @@ if app_mode == "1. Quantitative Forensic Scorecard":
         fig.add_hline(y=120, line_dash="dash", annotation_text="Risk Threshold")
         st.plotly_chart(fig, use_container_width=True)
 
-        # B. DETAILED DRILL DOWN (THE NEW FEATURE)
+        # B. DETAILED DRILL DOWN
         st.write("---")
         st.subheader("3. 🔍 Detailed Interpretation & Verdicts")
         st.info("Select a company below to read the AI-generated forensic interpretation.")
         
-        # Dropdown to pick a company
         selected_company = st.selectbox("Select Company for Deep Dive:", res['Company'].unique())
-        
-        # Filter data for that company
         comp_data = res[res['Company'] == selected_company].iloc[0]
         
-        # Display the Narrative
         with st.container():
             st.markdown(f"### 🏢 **{comp_data['Company']}**")
             
-            # 1. verdict Banner
             score = comp_data['Forensic_Score']
             if score > 50:
                 st.error(f"**Final Verdict:** {comp_data['Verdict']} (Score: {score}/100)")
             else:
                 st.success(f"**Final Verdict:** {comp_data['Verdict']} (Score: {score}/100)")
                 
-            # 2. Bullet Point Interpretation (The part you asked for)
             st.markdown("#### **📝 Interpretation of Results:**")
             if comp_data['Detailed_Report']:
                 for line in comp_data['Detailed_Report']:
@@ -228,14 +282,12 @@ if app_mode == "1. Quantitative Forensic Scorecard":
                 st.markdown("- ✅ No critical anomalies detected in the quantitative data.")
                 st.markdown("- ✅ Cash Quality and Working Capital cycles appear within healthy ranges.")
             
-            # 3. Key Metrics
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Pledge %", f"{comp_data['Pledge_Pct']}%")
             k2.metric("DSO (Days)", comp_data['DSO'])
             k3.metric("Cash Quality", comp_data['Cash_Quality'])
             k4.metric("RPT Intensity", f"{comp_data['RPT_Intensity']}%")
 
-        # C. Full Data Table (Plain, no color map to avoid error)
         with st.expander("View Raw Data Table"):
             st.dataframe(res)
 
@@ -266,12 +318,10 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
                 row = res.iloc[0]
                 
                 st.write("---")
-                # Verdict Banner
                 score = row['Forensic_Score']
                 if score > 50: st.error(f"**Verdict:** {row['Verdict']} (Score: {score})")
                 else: st.success(f"**Verdict:** {row['Verdict']} (Score: {score})")
                 
-                # Detailed Interpretation
                 st.markdown("#### **📝 Interpretation:**")
                 if row['Detailed_Report']:
                     for line in row['Detailed_Report']: st.markdown(f"- {line}")
@@ -305,7 +355,6 @@ elif app_mode == "3. Qualitative Sentiment Scanner":
             st.write("---")
             st.subheader("📝 Textual Interpretation")
             
-            # Logic for Interpretation
             interpretation = ""
             if subj > 0.5 and sent > 0.1:
                 interpretation = "🔴 **The Pollyanna Effect:** Management is using highly **subjective (vague)** and **optimistic** language. In high-pledge firms, this often indicates an attempt to mask financial stress with 'fluff'."
