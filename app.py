@@ -39,9 +39,8 @@ def find_value_in_text(text, keywords):
             except: continue
     return 0.0
 
-# --- Helper: Smart Column Mapper (RESTORED) ---
+# --- Helper: Smart Column Mapper ---
 def smart_map_columns(df):
-    # Dictionary of required standard names vs possible variations in user file
     mapping_rules = {
         'Company': ['company', 'entity', 'name', 'firm'],
         'Pledge_Pct': ['pledge', 'encumbered', 'promoter pledge', 'pledged'],
@@ -55,7 +54,6 @@ def smart_map_columns(df):
         'RPT_Vol': ['rpt', 'related party', 'related transaction']
     }
     
-    # Create a new mapping dictionary
     new_columns = {}
     found_cols = []
     
@@ -65,20 +63,16 @@ def smart_map_columns(df):
     
     cols_ui = st.columns(4)
     
-    # Iterate through rules and try to find matches
     for i, (standard_name, variations) in enumerate(mapping_rules.items()):
         match_found = None
-        # Look for exact or partial matches
         for col in df.columns:
             if any(v in col.lower() for v in variations):
                 match_found = col
                 break
         
-        # If no match found, try to use the standard name if it exists, else default to first col or 0
         if not match_found and standard_name in df.columns:
             match_found = standard_name
             
-        # Allow user to override the auto-detection
         with cols_ui[i % 4]:
             selected = st.selectbox(
                 f"Map to '{standard_name}'", 
@@ -91,10 +85,8 @@ def smart_map_columns(df):
                 new_columns[selected] = standard_name
                 found_cols.append(standard_name)
 
-    # Rename and return
     if new_columns:
         df_mapped = df.rename(columns=new_columns)
-        # Add missing columns as 0 to prevent errors
         for req in mapping_rules.keys():
             if req not in df_mapped.columns:
                 df_mapped[req] = 0
@@ -103,25 +95,20 @@ def smart_map_columns(df):
 
 # --- Helper: Adaptive Risk Calculation & Narrative ---
 def calculate_risk(df):
-    # 1. Clean Data
     cols = ['Sales', 'Receivables', 'Inventory', 'CFO', 'EBITDA', 'Pledge_Pct', 'Total_Assets', 'Non_Current_Assets', 'RPT_Vol']
     for c in cols:
         df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
-    # 2. Calculate Ratios
     df['DSO'] = df.apply(lambda x: (x['Receivables'] / x['Sales'] * 365) if x['Sales'] > 0 else 0, axis=1).round(1)
     df['Cash_Quality'] = df.apply(lambda x: (x['CFO'] / x['EBITDA']) if x['EBITDA'] > 0 else 0, axis=1).round(2)
     df['AQI'] = df.apply(lambda x: (x['Non_Current_Assets'] / x['Total_Assets']) if x['Total_Assets'] > 0 else 0, axis=1).round(2)
     df['RPT_Intensity'] = df.apply(lambda x: (x['RPT_Vol'] / x['Sales'] * 100) if x['Sales'] > 0 else 0, axis=1).round(1)
 
-    # 3. SMART GROUPING LOGIC
     sample_size = len(df)
     if sample_size < 30:
-        # Binary Grouping
         df['Risk_Group'] = df['Pledge_Pct'].apply(lambda x: "🔴 Critical (>50%)" if x > 50 else "🟢 Control (<50%)")
         grouping_method = "Binary (Small Sample Protocol)"
     else:
-        # Traffic Light Grouping
         def get_3_buckets(p):
             if p > 50: return "🔴 Critical (>50%)"
             elif p >= 10: return "🟡 Moderate (10-50%)"
@@ -129,37 +116,32 @@ def calculate_risk(df):
         df['Risk_Group'] = df['Pledge_Pct'].apply(get_3_buckets)
         grouping_method = "Traffic Light (Large Sample Protocol)"
 
-    # 4. Scoring & Narrative Logic
     def get_detailed_analysis(row):
         score = 0
         obs = []
         verdict = "Low Risk"
         
-        # PLEDGE CHECK
         if row['Pledge_Pct'] > 50:
             score += 25
-            obs.append(f"🔴 **Critical Pledge Pressure:** {row['Pledge_Pct']}% of shares are pledged. This creates a high incentive to manipulate earnings.")
+            obs.append(f"🔴 **Critical Pledge Pressure:** {row['Pledge_Pct']}% of shares are pledged.")
         elif row['Pledge_Pct'] > 20:
             score += 10
             obs.append(f"🟠 **Moderate Pledge:** {row['Pledge_Pct']}% pledged.")
 
-        # CASH CHECK
         if row['Cash_Quality'] < 0.5:
             score += 30
-            obs.append(f"🔴 **Fake Profit Alert:** Cash Quality is {row['Cash_Quality']}. For every ₹1 profit, only ₹{row['Cash_Quality']} is collected in cash.")
+            obs.append(f"🔴 **Fake Profit Alert:** Cash Quality is {row['Cash_Quality']}.")
         elif row['Cash_Quality'] < 0.8:
             score += 15
-            obs.append(f"🟠 **Weak Cash Flow:** Cash conversion (CFO/EBITDA) is below the healthy 0.8 benchmark.")
+            obs.append(f"🟠 **Weak Cash Flow:** Cash conversion (CFO/EBITDA) is low.")
 
-        # ACCRUALS CHECK
         if row['DSO'] > 120:
             score += 20
-            obs.append(f"🔴 **Aggressive Revenue:** Sales take {row['DSO']} days to collect (High DSO). Suggests channel stuffing.")
+            obs.append(f"🔴 **Aggressive Revenue:** Sales take {row['DSO']} days to collect.")
         if row['RPT_Intensity'] > 10:
             score += 10
-            obs.append(f"⚠️ **Leakage Risk:** {row['RPT_Intensity']}% of sales are with Related Parties.")
+            obs.append(f"⚠️ **Leakage Risk:** {row['RPT_Intensity']}% sales with Related Parties.")
 
-        # FINAL VERDICT
         if score >= 60: verdict = "🚨 HIGH PROBABILITY OF MANIPULATION"
         elif score >= 35: verdict = "⚠️ MODERATE RISK - Monitor Closely"
         else: verdict = "✅ LOW RISK - Clean Health"
@@ -179,14 +161,12 @@ def calculate_risk(df):
 if app_mode == "1. Quantitative Forensic Scorecard":
     st.header("📊 Module 1: Quantitative Analysis")
     
-    # Input Selection
     input_type = st.radio("Select Data Source:", ["✍️ Manual Entry (Small Sample)", "📁 Upload Excel (Batch Analysis)"], horizontal=True)
     
     df_in = None
     
-    # --- OPTION A: MANUAL ENTRY ---
     if input_type == "✍️ Manual Entry (Small Sample)":
-        st.info("Enter financial data manually below. Hover over columns for help.")
+        st.info("Enter financial data manually below.")
         template = {
             'Company': ['Vedanta', 'L&T'], 
             'Pledge_Pct': [99.0, 0.0], 
@@ -199,37 +179,31 @@ if app_mode == "1. Quantitative Forensic Scorecard":
             'Non_Current_Assets': [35000.0, 10000.0], 
             'RPT_Vol': [1200.0, 50.0]
         }
-        
-        df_in = st.data_editor(
-            pd.DataFrame(template),
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "Company": st.column_config.TextColumn("Company", help="Name of the listed entity."),
-                "Pledge_Pct": st.column_config.NumberColumn("Pledge %", help="Promoter Shareholding Encumbered (%)"),
-                "Sales": st.column_config.NumberColumn("Sales", help="Revenue from Operations"),
-                "CFO": st.column_config.NumberColumn("CFO", help="Net Cash from Operating Activities"),
-                "EBITDA": st.column_config.NumberColumn("EBITDA", help="Operating Profit"),
-                "RPT_Vol": st.column_config.NumberColumn("RPT Vol", help="Total Related Party Transactions Value")
-            }
-        )
+        df_in = st.data_editor(pd.DataFrame(template), num_rows="dynamic", use_container_width=True)
 
-    # --- OPTION B: EXCEL UPLOAD ---
     elif input_type == "📁 Upload Excel (Batch Analysis)":
-        st.write("Upload your Excel file. The tool will auto-detect columns matching 'Sales', 'Debtors', 'Pledge', etc.")
         up_file = st.file_uploader("Upload Excel/CSV", type=['xlsx', 'csv'])
         if up_file:
             if up_file.name.endswith('.csv'): raw_df = pd.read_csv(up_file)
             else: raw_df = pd.read_excel(up_file)
-            
-            # RUN SMART MAPPER
             df_in = smart_map_columns(raw_df)
 
-    # --- RUN ANALYSIS ---
-    if st.button("Run Forensic Analysis") and df_in is not None:
-        res, method_used = calculate_risk(df_in)
+    # --- KEY FIX: USING SESSION STATE FOR PERSISTENCE ---
+    if st.button("Run Forensic Analysis"):
+        if df_in is not None:
+            res, method_used = calculate_risk(df_in)
+            # Store results in Session State
+            st.session_state['results'] = res
+            st.session_state['method'] = method_used
+            st.session_state['data_loaded'] = True
+        else:
+            st.error("Please provide valid data.")
+
+    # --- DISPLAY RESULTS IF DATA IS LOADED ---
+    if st.session_state.get('data_loaded'):
+        res = st.session_state['results']
+        method_used = st.session_state['method']
         
-        # A. Summary & Charts
         st.write("---")
         st.subheader(f"1. Sample Overview (Method: {method_used})")
         
@@ -262,7 +236,11 @@ if app_mode == "1. Quantitative Forensic Scorecard":
         st.subheader("3. 🔍 Detailed Interpretation & Verdicts")
         st.info("Select a company below to read the AI-generated forensic interpretation.")
         
-        selected_company = st.selectbox("Select Company for Deep Dive:", res['Company'].unique())
+        # --- DROPDOWN LOGIC FIXED ---
+        company_list = res['Company'].unique()
+        selected_company = st.selectbox("Select Company for Deep Dive:", company_list)
+        
+        # Get data for selected company
         comp_data = res[res['Company'] == selected_company].iloc[0]
         
         with st.container():
@@ -292,7 +270,7 @@ if app_mode == "1. Quantitative Forensic Scorecard":
             st.dataframe(res)
 
 # ==========================================
-# MODULE 2: SINGLE PDF AUTO
+# MODULE 2 & 3 (Keeping as is)
 # ==========================================
 elif app_mode == "2. Single Company Auto-Analysis (PDF)":
     st.header("⚡ Single Company Deep Dive")
@@ -316,7 +294,6 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
             if st.button("Analyze"):
                 res, _ = calculate_risk(verified_df)
                 row = res.iloc[0]
-                
                 st.write("---")
                 score = row['Forensic_Score']
                 if score > 50: st.error(f"**Verdict:** {row['Verdict']} (Score: {score})")
@@ -328,45 +305,31 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
                 else:
                     st.markdown("- ✅ Financials appear robust with no major red flags.")
 
-# ==========================================
-# MODULE 3: TEXT (Updated with Guidelines)
-# ==========================================
 elif app_mode == "3. Qualitative Sentiment Scanner":
     st.header("🧠 Qualitative Sentiment Scanner")
-    
     st.info("💡 **What text should I paste here?**")
     st.markdown("""
-    To get accurate results, do not paste financial tables. Paste text where management discusses the future or challenges.
-    
     **Recommended Sources:**
-    1. **Annual Report > Management Discussion & Analysis (MD&A):** Look for sub-sections titled *"Risks and Concerns"*, *"Threats"*, or *"Outlook"*.
-    2. **Director's Report:** Look for the *"State of Company Affairs"* paragraph.
-    3. **Earnings Call Transcripts:** Paste the CEO's opening remarks or answers to tough questions about debt.
-    4. **Credit Rating Reports:** Paste the "Rationale" section from CRISIL/ICRA reports.
+    1. **MD&A:** "Risks and Concerns", "Outlook".
+    2. **Director's Report:** "State of Company Affairs".
     """)
-    
-    txt = st.text_area("Paste Text Here", height=200, placeholder="Example: 'Despite the challenging market conditions and liquidity constraints...'")
-    
+    txt = st.text_area("Paste Text Here", height=200, placeholder="Example: 'Despite the challenging market conditions...'")
     if st.button("Scan Text"):
         if len(txt) > 50:
             blob = TextBlob(txt)
             sent, subj = blob.sentiment.polarity, blob.sentiment.subjectivity
-            
             st.write("---")
             st.subheader("📝 Textual Interpretation")
-            
             interpretation = ""
             if subj > 0.5 and sent > 0.1:
-                interpretation = "🔴 **The Pollyanna Effect:** Management is using highly **subjective (vague)** and **optimistic** language. In high-pledge firms, this often indicates an attempt to mask financial stress with 'fluff'."
+                interpretation = "🔴 **The Pollyanna Effect:** Management is using highly **subjective (vague)** and **optimistic** language."
             elif sent < -0.05:
-                interpretation = "🟢 **Honest/Cautious:** The tone is negative or neutral, which typically suggests an honest disclosure of risks."
+                interpretation = "🟢 **Honest/Cautious:** The tone is negative or neutral."
             else:
-                interpretation = "🟡 **Neutral:** The language is balanced, neither suspiciously vague nor overly negative."
-            
+                interpretation = "🟡 **Neutral:** The language is balanced."
             st.markdown(f"**Analysis Verdict:** {interpretation}")
-            
             c1, c2 = st.columns(2)
-            c1.metric("Vagueness (Subjectivity)", f"{subj:.2f}", help=">0.5 is suspicious")
-            c2.metric("Sentiment (Optimism)", f"{sent:.2f}")
+            c1.metric("Vagueness", f"{subj:.2f}")
+            c2.metric("Sentiment", f"{sent:.2f}")
         else:
             st.warning("Please paste at least 50 characters.")
