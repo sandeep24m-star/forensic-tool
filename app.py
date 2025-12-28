@@ -25,7 +25,6 @@ with st.sidebar:
     
     st.write("---")
     st.markdown("### 🔧 Data Settings")
-    # Manual Header Row Selector
     header_row_val = st.number_input("Header Row Number (in Excel)", min_value=1, value=1, step=1, help="If columns aren't detecting, try changing this to 2 or 3.") - 1
 
 # --- Helper: Extract Text from PDF Upload ---
@@ -37,54 +36,52 @@ def extract_pdf_text(uploaded_file):
             if text: all_text += text + "\n"
     return all_text
 
-# --- Helper: Extract Text from URL (With Firewall Detection) ---
+# --- Helper: Extract Text from URL (Robust) ---
 def extract_url_text(url):
     try:
-        # 1. Mimic a Browser
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
         }
         
-        # 2. Try Downloading
         response = requests.get(url, headers=headers, timeout=15, stream=True)
         
-        # 3. Check for Security Blocks (403/404)
         if response.status_code != 200:
             return f"⚠️ Error: Website returned Status Code {response.status_code} (Likely Blocked by Firewall)."
 
-        # 4. SAFETY CHECK: Is it actually a PDF?
-        # Read the first 4 bytes to look for the "%PDF" signature
+        # Check if PDF
         first_bytes = next(response.iter_content(chunk_size=4))
         
         if first_bytes.startswith(b'%PDF') or url.lower().endswith('.pdf'):
-            # It IS a PDF -> Use pdfplumber
             try:
-                # We need to read the whole content now
                 pdf_data = io.BytesIO(response.content)
                 with pdfplumber.open(pdf_data) as pdf:
                     all_text = ""
-                    for page in pdf.pages[:50]: # Limit to 50 pages
+                    for page in pdf.pages[:50]:
                         txt = page.extract_text()
                         if txt: all_text += txt + "\n"
-                    return all_text if len(all_text) > 0 else "⚠️ PDF downloaded but no readable text found (Scanned Image?)."
+                    return all_text if len(all_text) > 0 else "⚠️ PDF downloaded but no readable text found."
             except Exception as e:
-                return f"⚠️ Error parsing PDF: {e} (The file might be encrypted or corrupted)."
+                return f"⚠️ Error parsing PDF: {e}"
         
         else:
-            # It is NOT a PDF -> Treat as HTML
+            # HTML Parsing
             soup = BeautifulSoup(response.content, 'html.parser')
             
             # Remove Junk
-            for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form', 'noscript', 'iframe']):
+            for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form', 'noscript', 'iframe', 'button', 'input']):
                 element.decompose()
 
-            content_area = soup.find('main') or soup.find('article') or soup.find('div', {'role': 'main'}) or soup.body
+            # Smart Content Finder
+            content_area = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'content|body|article|post|entry')) or soup.body
             
             if content_area:
+                # Get text with separator to avoid merging words
                 text = content_area.get_text(separator=' ', strip=True)
-                lines = [line for line in text.split('\n') if len(line) > 50]
-                return " ".join(lines) if len(lines) > 0 else "⚠️ No main content found."
+                # Filter out short menu items/garbage lines
+                lines = [line for line in text.split('\n') if len(line.split()) > 3] 
+                clean_text = " ".join(lines)
+                return clean_text if len(clean_text) > 100 else content_area.get_text(separator=' ', strip=True)
             else:
                 return "⚠️ Could not parse page content."
 
@@ -119,14 +116,12 @@ def smart_map_columns(df):
     new_columns = {}
     st.write("---")
     st.markdown("### 🧬 Auto-Column Detection")
-    st.caption("Scanning headers... If incorrect, select manually below.")
     cols_ui = st.columns(3)
     for i, (standard_name, variations) in enumerate(mapping_rules.items()):
         match_found = None
         for col in df.columns:
             if any(v in col.lower() for v in variations):
-                match_found = col
-                break
+                match_found = col; break
         if not match_found and standard_name in df.columns: match_found = standard_name
         with cols_ui[i % 3]:
             selected = st.selectbox(f"Map to '{standard_name}'", options=["(Select Column)"] + list(df.columns), index=list(df.columns).index(match_found) + 1 if match_found else 0, key=f"map_{standard_name}")
@@ -138,7 +133,7 @@ def smart_map_columns(df):
         return df_mapped
     return df
 
-# --- Helper: Adaptive Risk Calculation ---
+# --- Helper: Risk Calculation ---
 def calculate_risk(df):
     cols = ['Sales', 'Receivables', 'Inventory', 'CFO', 'EBITDA', 'Pledge_Pct', 'Total_Assets', 'Non_Current_Assets', 'RPT_Vol']
     for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
@@ -146,30 +141,33 @@ def calculate_risk(df):
     df['Cash_Quality'] = df.apply(lambda x: (x['CFO'] / x['EBITDA']) if x['EBITDA'] > 0 else 0, axis=1).round(2)
     df['AQI'] = df.apply(lambda x: (x['Non_Current_Assets'] / x['Total_Assets']) if x['Total_Assets'] > 0 else 0, axis=1).round(2)
     df['RPT_Intensity'] = df.apply(lambda x: (x['RPT_Vol'] / x['Sales'] * 100) if x['Sales'] > 0 else 0, axis=1).round(1)
+    
     sample_size = len(df)
     if sample_size < 30:
         df['Risk_Group'] = df['Pledge_Pct'].apply(lambda x: "🔴 Critical (>50%)" if x > 50 else "🟢 Control (<50%)")
-        grouping_method = "Binary (Small Sample Protocol)"
+        grouping_method = "Binary (Small Sample)"
     else:
         def get_3_buckets(p):
             if p > 50: return "🔴 Critical (>50%)"
             elif p >= 10: return "🟡 Moderate (10-50%)"
             else: return "🟢 Safe (<10%)"
         df['Risk_Group'] = df['Pledge_Pct'].apply(get_3_buckets)
-        grouping_method = "Traffic Light (Large Sample Protocol)"
+        grouping_method = "Traffic Light (Large Sample)"
+        
     def get_detailed_analysis(row):
         score, obs = 0, []
         verdict = "Low Risk"
         if row['Pledge_Pct'] > 50: score += 25; obs.append(f"🔴 **Critical Pledge:** {row['Pledge_Pct']}% pledged.")
         elif row['Pledge_Pct'] > 20: score += 10; obs.append(f"🟠 **Moderate Pledge:** {row['Pledge_Pct']}% pledged.")
         if row['Cash_Quality'] < 0.5: score += 30; obs.append(f"🔴 **Fake Profit:** Cash Quality {row['Cash_Quality']}.")
-        elif row['Cash_Quality'] < 0.8: score += 15; obs.append(f"🟠 **Weak Cash Flow:** Low conversion.")
         if row['DSO'] > 120: score += 20; obs.append(f"🔴 **Aggressive Revenue:** DSO {row['DSO']} days.")
-        if row['RPT_Intensity'] > 10: score += 10; obs.append(f"⚠️ **Leakage Risk:** {row['RPT_Intensity']}% sales to Related Parties.")
-        if score >= 60: verdict = "🚨 HIGH PROBABILITY OF MANIPULATION"
+        if row['RPT_Intensity'] > 10: score += 10; obs.append(f"⚠️ **Leakage Risk:** {row['RPT_Intensity']}% sales to RPT.")
+        
+        if score >= 60: verdict = "🚨 HIGH RISK"
         elif score >= 35: verdict = "⚠️ MODERATE RISK"
         else: verdict = "✅ LOW RISK"
         return score, verdict, obs
+    
     results = df.apply(get_detailed_analysis, axis=1)
     df['Forensic_Score'] = [x[0] for x in results]; df['Verdict'] = [x[1] for x in results]; df['Detailed_Report'] = [x[2] for x in results]
     return df, grouping_method
@@ -201,11 +199,13 @@ if app_mode == "1. Quantitative Forensic Scorecard":
                     else: raw_df = pd.read_excel(xls, sheet_name=0, header=header_row_val)
                 df_in = smart_map_columns(raw_df)
             except Exception as e: st.error(f"❌ Error loading file: {e}")
+
     if st.button("Run Forensic Analysis"):
         if df_in is not None:
             res, method_used = calculate_risk(df_in)
             st.session_state['results'] = res; st.session_state['method'] = method_used; st.session_state['data_loaded'] = True
         else: st.error("Please provide valid data.")
+
     if st.session_state.get('data_loaded'):
         res = st.session_state['results']
         st.write("---"); st.subheader("2. Hypothesis Testing (Visualizer)")
@@ -247,30 +247,65 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
                 else: st.markdown("- ✅ Financials appear robust.")
 
 # ==========================================
-# MODULE 3: SENTIMENT SCANNER (FIXED)
+# MODULE 3: SENTIMENT SCANNER (FIXED SESSION STATE)
 # ==========================================
 elif app_mode == "3. Qualitative Sentiment Scanner":
     st.header("🧠 Qualitative Sentiment Scanner")
     st.info("Analyze the 'Tone' of Management Disclosures.")
+    
+    # Initialize Session State for Text Persistence
+    if 'sentiment_text' not in st.session_state:
+        st.session_state['sentiment_text'] = ""
+
     input_method = st.radio("Choose Input Method:", ["📝 Paste Text", "🌐 Paste URL"], horizontal=True)
-    user_text = ""
-    if input_method == "📝 Paste Text": user_text = st.text_area("Paste text here:", height=200)
+    
+    # INPUT SECTION
+    if input_method == "📝 Paste Text":
+        user_input = st.text_area("Paste text here:", height=200, value=st.session_state['sentiment_text'])
+        # Update session state if user types manually
+        if user_input: st.session_state['sentiment_text'] = user_input
+        
     elif input_method == "🌐 Paste URL":
-        st.caption("Supports News & Public PDFs. (Note: Corporate firewalls may block cloud scrapers).")
+        st.caption("Supports News & Public PDFs.")
         url = st.text_input("Enter URL:", placeholder="https://...")
-        if url:
-            if st.button("Fetch Text from URL"):
+        
+        if st.button("Fetch Text from URL"):
+            if url:
                 with st.spinner("Fetching..."):
-                    user_text = extract_url_text(url)
-                    if "Error" in user_text: st.error(user_text)
-                    else: st.success(f"Fetched {len(user_text)} chars"); st.text_area("Content:", value=user_text[:2000] + "...", height=200)
+                    fetched_text = extract_url_text(url)
+                    if "Error" in fetched_text:
+                        st.error(fetched_text)
+                    else:
+                        # STORE IN SESSION STATE so it survives the re-run
+                        st.session_state['sentiment_text'] = fetched_text
+                        st.success(f"Fetched {len(fetched_text)} chars")
+            else:
+                st.warning("Please enter a URL.")
+
+        # Show the content currently in memory
+        if len(st.session_state['sentiment_text']) > 0:
+            st.text_area("Content to Analyze:", value=st.session_state['sentiment_text'][:2000] + "...", height=200)
+
+    # ANALYSIS SECTION
     if st.button("Run Sentiment Analysis"):
-        if len(user_text) > 50:
-            blob = TextBlob(user_text); sent = blob.sentiment.polarity; subj = blob.sentiment.subjectivity
-            st.write("---"); st.subheader("📝 Forensic Interpretation"); col1, col2 = st.columns(2)
-            col1.metric("Positivity", f"{sent:.2f}"); col2.metric("Subjectivity", f"{subj:.2f}")
+        # Retrieve from Session State
+        text_to_analyze = st.session_state['sentiment_text']
+        
+        if len(text_to_analyze) > 50:
+            blob = TextBlob(text_to_analyze)
+            sent = blob.sentiment.polarity
+            subj = blob.sentiment.subjectivity
+            
+            st.write("---")
+            st.subheader("📝 Forensic Interpretation")
+            col1, col2 = st.columns(2)
+            col1.metric("Positivity", f"{sent:.2f}")
+            col2.metric("Subjectivity", f"{subj:.2f}")
+            
+            st.markdown("### **💡 AI Verdict:**")
             if subj > 0.5 and sent > 0.2: st.error("🔴 **Pollyanna Effect:** Vague & Optimistic (High Risk).")
             elif subj > 0.5 and sent < -0.2: st.warning("🟠 **Panicked Obfuscation:** Negative & Subjective.")
             elif subj < 0.4 and sent > 0.2: st.success("🟢 **Strong & Objective:** Optimism backed by facts.")
             else: st.info("🔵 **Neutral/Honest:** Balanced tone.")
-        else: st.warning("Please provide more text.")
+        else:
+            st.warning("Please provide more text (Fetch URL or Paste Text first).")
