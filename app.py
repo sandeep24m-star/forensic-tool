@@ -19,6 +19,11 @@ with st.sidebar:
         "3. Qualitative Sentiment Scanner"
     ])
     st.info("ℹ️ **Smart Logic:**\n- **N < 30:** Tool uses 2 Groups (Binary).\n- **N ≥ 30:** Tool uses 3 Groups (Traffic Light).")
+    
+    st.write("---")
+    st.markdown("### 🔧 Data Settings")
+    # Manual Header Row Selector
+    header_row_val = st.number_input("Header Row Number (in Excel)", min_value=1, value=1, step=1, help="If columns aren't detecting, try changing this to 2 or 3.") - 1
 
 # --- Helper: Extract Text ---
 def extract_pdf_text(uploaded_file):
@@ -39,7 +44,7 @@ def find_value_in_text(text, keywords):
             except: continue
     return 0.0
 
-# --- Helper: Smart Column Mapper (Fixed Version) ---
+# --- Helper: Smart Column Mapper (Sheet-Smart Version) ---
 def smart_map_columns(df):
     # 1. Clean the headers (Remove spaces, newlines, and convert to string)
     df.columns = df.columns.astype(str).str.strip().str.replace('\n', ' ')
@@ -50,8 +55,8 @@ def smart_map_columns(df):
         'Sales': ['sales', 'revenue', 'turnover', 'income', 'top line'],
         'Receivables': ['receivables', 'debtors', 'trade receivables', 'accounts receivable'],
         'Inventory': ['inventory', 'stock', 'inventories'],
-        'CFO': ['cfo', 'operating cash', 'cash from operations', 'cash flow from operating'],
-        'EBITDA': ['ebitda', 'operating profit', 'pbit', 'profit before interest'],
+        'CFO': ['cfo', 'cf operations', 'operating cash', 'cash from operations', 'cash flow from operating'],
+        'EBITDA': ['ebitda', 'operating profit', 'pbit', 'profit before interest', 'opm'],
         'Total_Assets': ['total assets', 'balance sheet total', 'assets'],
         'Non_Current_Assets': ['non current assets', 'fixed assets', 'long term assets'],
         'RPT_Vol': ['rpt', 'related party', 'related transaction']
@@ -62,7 +67,7 @@ def smart_map_columns(df):
     
     st.write("---")
     st.markdown("### 🧬 Auto-Column Detection")
-    st.caption("Scanning Excel headers... If incorrect, select manually below.")
+    st.caption("Scanning headers... If incorrect, select manually below.")
     
     cols_ui = st.columns(3)
     
@@ -196,24 +201,29 @@ if app_mode == "1. Quantitative Forensic Scorecard":
             try:
                 # --- NEW LOGIC: FIND THE RIGHT SHEET AUTOMATICALLY ---
                 if up_file.name.endswith('.csv'):
-                    raw_df = pd.read_csv(up_file)
+                    raw_df = pd.read_csv(up_file, header=header_row_val)
                 else:
+                    # 1. Load the Excel file wrapper
                     xls = pd.ExcelFile(up_file)
                     target_sheet = None
+                    
+                    # 2. Iterate through ALL sheets to find the one with data
                     for sheet in xls.sheet_names:
-                        df_check = pd.read_excel(xls, sheet_name=sheet, nrows=5)
+                        df_check = pd.read_excel(xls, sheet_name=sheet, nrows=5, header=header_row_val)
+                        # Check if this sheet has "Sales" or "Name" or "Pledge" columns
                         cols_lower = [str(c).lower() for c in df_check.columns]
-                        if any('sales' in c for c in cols_lower) or any('pledge' in c for c in cols_lower):
+                        if any('sales' in c for c in cols_lower) or any('pledge' in c for c in cols_lower) or any('company' in c for c in cols_lower):
                             target_sheet = sheet
                             break
                     
                     if target_sheet:
-                        st.success(f"✅ Data detected in Sheet: '{target_sheet}'")
-                        raw_df = pd.read_excel(xls, sheet_name=target_sheet)
+                        st.success(f"✅ Data detected in Sheet: '{target_sheet}' (Using Header Row {header_row_val + 1})")
+                        raw_df = pd.read_excel(xls, sheet_name=target_sheet, header=header_row_val)
                     else:
-                        st.warning("⚠️ Could not auto-detect data sheet. Loading the first sheet.")
-                        raw_df = pd.read_excel(xls, sheet_name=0)
+                        st.warning("⚠️ Could not auto-detect data sheet. Loading the first sheet by default.")
+                        raw_df = pd.read_excel(xls, sheet_name=0, header=header_row_val)
 
+                # Run mapping
                 df_in = smart_map_columns(raw_df)
                 
             except Exception as e:
@@ -223,6 +233,7 @@ if app_mode == "1. Quantitative Forensic Scorecard":
     if st.button("Run Forensic Analysis"):
         if df_in is not None:
             res, method_used = calculate_risk(df_in)
+            # Store results in Session State
             st.session_state['results'] = res
             st.session_state['method'] = method_used
             st.session_state['data_loaded'] = True
@@ -308,9 +319,11 @@ if app_mode == "1. Quantitative Forensic Scorecard":
         st.subheader("3. 🔍 Detailed Interpretation & Verdicts")
         st.info("Select a company below to read the AI-generated forensic interpretation.")
         
+        # --- DROPDOWN LOGIC FIXED ---
         company_list = res['Company'].unique()
         selected_company = st.selectbox("Select Company for Deep Dive:", company_list)
         
+        # Get data for selected company
         comp_data = res[res['Company'] == selected_company].iloc[0]
         
         with st.container():
@@ -327,7 +340,7 @@ if app_mode == "1. Quantitative Forensic Scorecard":
                 for line in comp_data['Detailed_Report']:
                     st.markdown(f"- {line}")
             else:
-                st.markdown("- ✅ No critical anomalies detected.")
+                st.markdown("- ✅ No critical anomalies detected in the quantitative data.")
                 st.markdown("- ✅ Cash Quality and Working Capital cycles appear within healthy ranges.")
             
             k1, k2, k3, k4 = st.columns(4)
@@ -406,4 +419,3 @@ elif app_mode == "3. Qualitative Sentiment Scanner":
             c2.metric("Sentiment", f"{sent:.2f}")
         else:
             st.warning("Please paste at least 50 characters.")
-
