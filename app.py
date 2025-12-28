@@ -176,16 +176,16 @@ if app_mode == "1. Quantitative Forensic Scorecard":
     if input_type == "✍️ Manual Entry (Small Sample)":
         st.info("Enter financial data manually below.")
         template = {
-            'Company': ['Vedanta', 'L&T'], 
-            'Pledge_Pct': [99.0, 0.0], 
-            'Sales': [12000.0, 4000.0], 
-            'Receivables': [3500.0, 400.0],
-            'Inventory': [1500.0, 300.0], 
-            'CFO': [2000.0, 3500.0], 
-            'EBITDA': [4000.0, 3800.0],
-            'Total_Assets': [50000.0, 20000.0], 
-            'Non_Current_Assets': [35000.0, 10000.0], 
-            'RPT_Vol': [1200.0, 50.0]
+            'Company': ['Vedanta', 'L&T', 'Adani Ent', 'Tata Steel', 'Reliance'], 
+            'Pledge_Pct': [99.0, 0.0, 25.0, 0.0, 0.0], 
+            'Sales': [12000.0, 4000.0, 8000.0, 15000.0, 20000.0], 
+            'Receivables': [3500.0, 400.0, 1200.0, 900.0, 1500.0],
+            'Inventory': [1500.0, 300.0, 800.0, 2000.0, 2500.0], 
+            'CFO': [2000.0, 3500.0, 500.0, 3000.0, 18000.0], 
+            'EBITDA': [4000.0, 3800.0, 1500.0, 4500.0, 22000.0],
+            'Total_Assets': [50000.0, 20000.0, 35000.0, 60000.0, 100000.0], 
+            'Non_Current_Assets': [35000.0, 10000.0, 25000.0, 40000.0, 70000.0], 
+            'RPT_Vol': [1200.0, 50.0, 500.0, 100.0, 200.0]
         }
         df_in = st.data_editor(pd.DataFrame(template), num_rows="dynamic", use_container_width=True)
 
@@ -194,41 +194,35 @@ if app_mode == "1. Quantitative Forensic Scorecard":
         
         if up_file:
             try:
-                # --- NEW LOGIC: FIND THE CORRECT HEADER ROW ---
+                # --- NEW LOGIC: FIND THE RIGHT SHEET AUTOMATICALLY ---
                 if up_file.name.endswith('.csv'):
-                    df_temp = pd.read_csv(up_file, header=None, nrows=10)
+                    raw_df = pd.read_csv(up_file)
                 else:
-                    df_temp = pd.read_excel(up_file, header=None, nrows=10)
-                
-                # Scan first 10 rows to find keywords like "Sales" or "Profit"
-                header_row_index = 0
-                for i, row in df_temp.iterrows():
-                    row_str = row.astype(str).str.lower().tolist()
-                    # If a row contains 'sales' AND 'profit', it's likely the header
-                    if any('sales' in x for x in row_str) and any('profit' in x for x in row_str):
-                        header_row_index = i
-                        break
-                
-                # Reload the full file with the detected header row
-                up_file.seek(0) # Reset file pointer
-                if up_file.name.endswith('.csv'):
-                    raw_df = pd.read_csv(up_file, header=header_row_index)
-                else:
-                    raw_df = pd.read_excel(up_file, header=header_row_index)
-                
-                st.success(f"✅ File Loaded Successfully! (Detected Headers on Row {header_row_index + 1})")
-                
-                # Run mapping
+                    xls = pd.ExcelFile(up_file)
+                    target_sheet = None
+                    for sheet in xls.sheet_names:
+                        df_check = pd.read_excel(xls, sheet_name=sheet, nrows=5)
+                        cols_lower = [str(c).lower() for c in df_check.columns]
+                        if any('sales' in c for c in cols_lower) or any('pledge' in c for c in cols_lower):
+                            target_sheet = sheet
+                            break
+                    
+                    if target_sheet:
+                        st.success(f"✅ Data detected in Sheet: '{target_sheet}'")
+                        raw_df = pd.read_excel(xls, sheet_name=target_sheet)
+                    else:
+                        st.warning("⚠️ Could not auto-detect data sheet. Loading the first sheet.")
+                        raw_df = pd.read_excel(xls, sheet_name=0)
+
                 df_in = smart_map_columns(raw_df)
                 
             except Exception as e:
                 st.error(f"❌ Error loading file: {e}")
 
-    # --- SESSION STATE PERSISTENCE (FIXES DROPDOWN BUG) ---
+    # --- SESSION STATE PERSISTENCE ---
     if st.button("Run Forensic Analysis"):
         if df_in is not None:
             res, method_used = calculate_risk(df_in)
-            # Store results in Session State
             st.session_state['results'] = res
             st.session_state['method'] = method_used
             st.session_state['data_loaded'] = True
@@ -251,20 +245,62 @@ if app_mode == "1. Quantitative Forensic Scorecard":
         for i, grp in enumerate(sorted_groups):
             cols[i+1].metric(grp, counts[grp])
 
-        st.subheader("2. Correlation Visualizer")
+        # --- NEW VISUALIZATION SECTION ---
+        st.write("---")
+        st.subheader("2. Hypothesis Testing (Visualizer)")
+        
+        viz_type = st.radio(
+            "Select Chart Type:", 
+            ["📦 Box Plot (Best for Distribution)", "📊 Bar Chart (Simple Averages)", "📍 Strip Plot (Granular View)", "⚪ Scatter Plot (Original)"],
+            horizontal=True
+        )
+
         color_map = {
             "🔴 Critical (>50%)": "#FF4B4B",
             "🟡 Moderate (10-50%)": "#FFA500", 
             "🟢 Safe (<10%)": "#00CC96",
             "🟢 Control (<50%)": "#00CC96"
         }
-        fig = px.scatter(
-            res, x="Pledge_Pct", y="DSO", color="Risk_Group",
-            size="Sales", hover_name="Company", hover_data=["Forensic_Score"],
-            color_discrete_map=color_map,
-            title=f"Hypothesis Test: Does Pledging Increase DSO? (N={len(res)})"
-        )
-        fig.add_hline(y=120, line_dash="dash", annotation_text="Risk Threshold")
+
+        if "Box Plot" in viz_type:
+            fig = px.box(
+                res, x="Risk_Group", y="DSO", color="Risk_Group",
+                color_discrete_map=color_map,
+                points="all", # Shows individual dots next to the box
+                title="Distribution of DSO across Risk Groups",
+                hover_data=["Company", "Sales"]
+            )
+        
+        elif "Bar Chart" in viz_type:
+            # Aggregate data for bar chart
+            avg_df = res.groupby("Risk_Group")['DSO'].mean().reset_index()
+            fig = px.bar(
+                avg_df, x="Risk_Group", y="DSO", color="Risk_Group",
+                color_discrete_map=color_map,
+                text_auto=True,
+                title="Average DSO by Risk Group (The Staircase Effect)"
+            )
+            fig.update_layout(yaxis_title="Average Days Sales Outstanding")
+
+        elif "Strip Plot" in viz_type:
+            fig = px.strip(
+                res, x="Risk_Group", y="DSO", color="Risk_Group",
+                color_discrete_map=color_map,
+                hover_name="Company",
+                title="Individual Company Risk Position (Jittered)",
+                stripmode='overlay'
+            )
+
+        else: # Original Scatter
+            fig = px.scatter(
+                res, x="Pledge_Pct", y="DSO", color="Risk_Group",
+                size="Sales", hover_name="Company", hover_data=["Forensic_Score"],
+                color_discrete_map=color_map,
+                title=f"Hypothesis Test: Pledge vs DSO (N={len(res)})"
+            )
+
+        # Add the Risk Threshold Line to all charts
+        fig.add_hline(y=120, line_dash="dash", line_color="red", annotation_text="High Risk (120 Days)")
         st.plotly_chart(fig, use_container_width=True)
 
         # B. DETAILED DRILL DOWN
@@ -272,11 +308,9 @@ if app_mode == "1. Quantitative Forensic Scorecard":
         st.subheader("3. 🔍 Detailed Interpretation & Verdicts")
         st.info("Select a company below to read the AI-generated forensic interpretation.")
         
-        # --- DROPDOWN LOGIC FIXED ---
         company_list = res['Company'].unique()
         selected_company = st.selectbox("Select Company for Deep Dive:", company_list)
         
-        # Get data for selected company
         comp_data = res[res['Company'] == selected_company].iloc[0]
         
         with st.container():
@@ -293,7 +327,7 @@ if app_mode == "1. Quantitative Forensic Scorecard":
                 for line in comp_data['Detailed_Report']:
                     st.markdown(f"- {line}")
             else:
-                st.markdown("- ✅ No critical anomalies detected in the quantitative data.")
+                st.markdown("- ✅ No critical anomalies detected.")
                 st.markdown("- ✅ Cash Quality and Working Capital cycles appear within healthy ranges.")
             
             k1, k2, k3, k4 = st.columns(4)
@@ -372,3 +406,4 @@ elif app_mode == "3. Qualitative Sentiment Scanner":
             c2.metric("Sentiment", f"{sent:.2f}")
         else:
             st.warning("Please paste at least 50 characters.")
+
