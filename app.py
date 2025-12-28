@@ -30,7 +30,7 @@ with st.sidebar:
     
     st.write("---")
     st.markdown("### 🔧 Data Settings")
-    header_row_val = st.number_input("Header Row Number (in Excel)", min_value=1, value=1, step=1) - 1
+    header_row_val = st.number_input("Header Row Number (in Excel)", min_value=1, value=1, step=1, help="If columns aren't detecting, try changing this to 2 or 3.") - 1
 
 # --- Helper: Extract Text from PDF Upload ---
 def extract_pdf_text(uploaded_file):
@@ -132,17 +132,33 @@ def calculate_risk(df):
     df['Cash_Quality'] = df.apply(lambda x: (x['CFO']/x['EBITDA']) if x['EBITDA']>0 else 0, axis=1).round(2)
     df['RPT_Intensity'] = df.apply(lambda x: (x['RPT_Vol']/x['Sales']*100) if x['Sales']>0 else 0, axis=1).round(1)
     
-    df['Risk_Group'] = df['Pledge_Pct'].apply(lambda x: "🔴 Critical" if x>50 else "🟢 Safe")
+    # Adaptive Grouping Logic
+    sample_size = len(df)
+    if sample_size < 30:
+        df['Risk_Group'] = df['Pledge_Pct'].apply(lambda x: "🔴 Critical (>50%)" if x > 50 else "🟢 Control (<50%)")
+        grouping_method = "Binary (Small Sample)"
+    else:
+        def get_3_buckets(p):
+            if p > 50: return "🔴 Critical (>50%)"
+            elif p >= 10: return "🟡 Moderate (10-50%)"
+            else: return "🟢 Safe (<10%)"
+        df['Risk_Group'] = df['Pledge_Pct'].apply(get_3_buckets)
+        grouping_method = "Traffic Light (Large Sample)"
 
     def analyze(row):
         score, obs = 0, []
         verdict = "Low Risk"
         if row['Pledge_Pct'] > 50: score += 25; obs.append(f"🔴 Critical Pledge: {row['Pledge_Pct']}%")
-        if row['DSO'] > 120: score += 20; obs.append(f"🔴 Aggressive Sales (DSO {row['DSO']})")
-        if row['Cash_Quality'] < 0.8: score += 15; obs.append(f"🟠 Weak Cash Flow ({row['Cash_Quality']})")
+        elif row['Pledge_Pct'] > 20: score += 10; obs.append(f"🟠 Moderate Pledge: {row['Pledge_Pct']}%")
         
-        if score >= 50: verdict = "🚨 HIGH RISK"
-        elif score >= 20: verdict = "⚠️ MODERATE RISK"
+        if row['DSO'] > 120: score += 20; obs.append(f"🔴 Aggressive Sales (DSO {row['DSO']})")
+        if row['Cash_Quality'] < 0.5: score += 30; obs.append(f"🔴 Fake Profit Alert (CQR {row['Cash_Quality']})")
+        elif row['Cash_Quality'] < 0.8: score += 15; obs.append(f"🟠 Weak Cash Flow (CQR {row['Cash_Quality']})")
+        
+        if row['RPT_Intensity'] > 10: score += 10; obs.append(f"⚠️ High RPT Leakage ({row['RPT_Intensity']}%)")
+        
+        if score >= 60: verdict = "🚨 HIGH PROBABILITY OF MANIPULATION"
+        elif score >= 35: verdict = "⚠️ MODERATE RISK"
         else: verdict = "✅ LOW RISK"
         return score, verdict, obs
     
@@ -150,7 +166,7 @@ def calculate_risk(df):
     df['Forensic_Score'] = [x[0] for x in res]
     df['Verdict'] = [x[1] for x in res]
     df['Detailed_Report'] = [x[2] for x in res]
-    return df, "Standard"
+    return df, grouping_method
 
 # --- Helper: Extract URL Text (For Module 3) ---
 def extract_url_text(url):
@@ -171,12 +187,12 @@ def smart_map_columns(df):
     df.columns = df.columns.astype(str).str.strip().str.replace('\n', ' ')
     mapping_rules = {
         'Company': ['company', 'entity', 'name'],
-        'Pledge_Pct': ['pledge', 'encumbered'],
-        'Sales': ['sales', 'revenue', 'turnover'],
+        'Pledge_Pct': ['pledge', 'encumbered', 'promoter pledge'],
+        'Sales': ['sales', 'revenue', 'turnover', 'income'],
         'Receivables': ['receivables', 'debtors'],
         'Inventory': ['inventory', 'stock'],
         'CFO': ['cfo', 'operating cash'],
-        'EBITDA': ['ebitda', 'operating profit'],
+        'EBITDA': ['ebitda', 'operating profit', 'pbit'],
         'Total_Assets': ['total assets', 'balance sheet total'],
         'Non_Current_Assets': ['non current assets', 'fixed assets'],
         'RPT_Vol': ['rpt', 'related party']
@@ -184,6 +200,8 @@ def smart_map_columns(df):
     new_cols = {}
     st.write("---")
     st.markdown("### 🧬 Auto-Column Detection")
+    st.caption("Scanning headers... If incorrect, select manually below.")
+    
     cols_ui = st.columns(3)
     for i, (std, vars_) in enumerate(mapping_rules.items()):
         match = None
@@ -201,10 +219,11 @@ def smart_map_columns(df):
 
 
 # ==========================================
-# MODULE 1: QUANTITATIVE SCORECARD
+# MODULE 1: QUANTITATIVE SCORECARD (RESTORED)
 # ==========================================
 if app_mode == "1. Quantitative Forensic Scorecard":
     st.header("📊 Module 1: Quantitative Analysis")
+    
     input_type = st.radio("Select Data Source:", ["✍️ Manual Entry (Small Sample)", "📁 Upload Excel (Batch Analysis)"], horizontal=True)
     df_in = None
     
@@ -220,23 +239,107 @@ if app_mode == "1. Quantitative Forensic Scorecard":
                 if up_file.name.endswith('.csv'): raw_df = pd.read_csv(up_file, header=header_row_val)
                 else:
                     xls = pd.ExcelFile(up_file)
-                    raw_df = pd.read_excel(xls, sheet_name=0, header=header_row_val)
+                    target_sheet = None
+                    # Smart Sheet Finder
+                    for sheet in xls.sheet_names:
+                        df_check = pd.read_excel(xls, sheet_name=sheet, nrows=5, header=header_row_val)
+                        cols_lower = [str(c).lower() for c in df_check.columns]
+                        if any('sales' in c for c in cols_lower) or any('pledge' in c for c in cols_lower): 
+                            target_sheet = sheet; break
+                    
+                    if target_sheet:
+                        st.success(f"✅ Data detected in Sheet: '{target_sheet}' (Row {header_row_val+1})")
+                        raw_df = pd.read_excel(xls, sheet_name=target_sheet, header=header_row_val)
+                    else:
+                        raw_df = pd.read_excel(xls, sheet_name=0, header=header_row_val)
+                        
                 df_in = smart_map_columns(raw_df)
             except Exception as e: st.error(f"❌ Error: {e}")
 
+    # --- SESSION STATE PERSISTENCE ---
     if st.button("Run Forensic Analysis"):
         if df_in is not None:
-            res, _ = calculate_risk(df_in)
-            st.write("---")
-            st.subheader("Results Overview")
-            st.dataframe(res)
+            res, method_used = calculate_risk(df_in)
+            st.session_state['results'] = res
+            st.session_state['method'] = method_used
+            st.session_state['data_loaded'] = True
+        else: st.error("Please provide valid data.")
+
+    # --- DISPLAY RESULTS ---
+    if st.session_state.get('data_loaded'):
+        res = st.session_state['results']
+        method_used = st.session_state['method']
+        
+        st.write("---")
+        st.subheader(f"1. Sample Overview (Method: {method_used})")
+        
+        counts = res['Risk_Group'].value_counts()
+        cols = st.columns(len(counts) + 1)
+        cols[0].metric("Total Samples", len(res))
+        
+        sorted_groups = sorted(counts.index.tolist(), reverse=True)
+        for i, grp in enumerate(sorted_groups):
+            cols[i+1].metric(grp, counts[grp])
+
+        # --- TABS FOR VISUALIZATION ---
+        st.write("---")
+        st.subheader("2. Hypothesis Testing (Visualizer)")
+        
+        tab1, tab2, tab3, tab4 = st.tabs(["⚪ Scatter Plot", "📦 Box Plot", "📊 Bar Chart", "📍 Strip Plot"])
+        color_map = {
+            "🔴 Critical (>50%)": "#FF4B4B",
+            "🟡 Moderate (10-50%)": "#FFA500", 
+            "🟢 Safe (<10%)": "#00CC96",
+            "🟢 Control (<50%)": "#00CC96"
+        }
+
+        with tab1:
+            fig1 = px.scatter(res, x="Pledge_Pct", y="DSO", color="Risk_Group",
+                size="Sales", hover_name="Company", hover_data=["Forensic_Score"],
+                color_discrete_map=color_map, title="Pledge vs DSO")
+            fig1.add_hline(y=120, line_dash="dash", line_color="red")
+            st.plotly_chart(fig1, use_container_width=True)
+
+        with tab2:
+            fig2 = px.box(res, x="Risk_Group", y="DSO", color="Risk_Group",
+                color_discrete_map=color_map, points="all", title="Distribution of DSO")
+            fig2.add_hline(y=120, line_dash="dash", line_color="red")
+            st.plotly_chart(fig2, use_container_width=True)
+
+        with tab3:
+            avg_df = res.groupby("Risk_Group")['DSO'].mean().reset_index()
+            fig3 = px.bar(avg_df, x="Risk_Group", y="DSO", color="Risk_Group",
+                color_discrete_map=color_map, text_auto=True, title="Average DSO")
+            st.plotly_chart(fig3, use_container_width=True)
             
-            # Simple Chart
-            fig = px.scatter(res, x="Pledge_Pct", y="DSO", color="Risk_Group", size="Sales", title="Pledge vs DSO")
-            fig.add_hline(y=120, line_dash="dash", line_color="red")
-            st.plotly_chart(fig, use_container_width=True)
-            
-        else: st.error("Please provide data.")
+        with tab4:
+            fig4 = px.strip(res, x="Risk_Group", y="DSO", color="Risk_Group",
+                color_discrete_map=color_map, hover_name="Company", title="Risk Position")
+            fig4.add_hline(y=120, line_dash="dash", line_color="red")
+            st.plotly_chart(fig4, use_container_width=True)
+
+        # --- DETAILED DRILL DOWN ---
+        st.write("---")
+        st.subheader("3. 🔍 Detailed Interpretation")
+        company_list = res['Company'].unique()
+        selected_company = st.selectbox("Select Company for Deep Dive:", company_list)
+        
+        comp_data = res[res['Company'] == selected_company].iloc[0]
+        
+        with st.container():
+            st.markdown(f"### 🏢 **{comp_data['Company']}**")
+            score = comp_data['Forensic_Score']
+            if score > 50:
+                st.error(f"**Final Verdict:** {comp_data['Verdict']} (Score: {score}/100)")
+            else:
+                st.success(f"**Final Verdict:** {comp_data['Verdict']} (Score: {score}/100)")
+                
+            st.markdown("#### **📝 AI Interpretation:**")
+            if comp_data['Detailed_Report']:
+                for line in comp_data['Detailed_Report']:
+                    st.markdown(f"- {line}")
+            else:
+                st.markdown("- ✅ No critical anomalies detected.")
 
 # ==========================================
 # MODULE 2: PDF SCANNER (GenAI + Regex Hybrid)
