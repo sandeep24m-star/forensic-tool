@@ -3,4 +3,6 @@ pandas
 plotly
 textblob
 pdfplumber
+requests
+beautifulsoup4
 openpyxl
