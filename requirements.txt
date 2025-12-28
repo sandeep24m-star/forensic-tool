@@ -6,3 +6,4 @@ pdfplumber
 requests
 beautifulsoup4
 openpyxl
+openai
