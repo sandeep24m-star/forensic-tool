@@ -6,6 +6,7 @@ import pdfplumber
 import re
 import requests
 from bs4 import BeautifulSoup
+import io  # New import for handling PDF streams
 
 # --- Page Config ---
 st.set_page_config(page_title="Forensic Engine Ultimate", layout="wide")
@@ -27,7 +28,7 @@ with st.sidebar:
     # Manual Header Row Selector
     header_row_val = st.number_input("Header Row Number (in Excel)", min_value=1, value=1, step=1, help="If columns aren't detecting, try changing this to 2 or 3.") - 1
 
-# --- Helper: Extract Text from PDF ---
+# --- Helper: Extract Text from PDF Upload ---
 def extract_pdf_text(uploaded_file):
     all_text = ""
     with pdfplumber.open(uploaded_file) as pdf:
@@ -36,33 +37,44 @@ def extract_pdf_text(uploaded_file):
             if text: all_text += text + "\n"
     return all_text
 
-# --- Helper: Extract Text from URL (IMPROVED) ---
+# --- Helper: Extract Text from URL (PDF & HTML Supported) ---
 def extract_url_text(url):
     try:
-        # 1. Mimic a real browser to avoid 403 Forbidden errors
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=headers, timeout=20)
+        
+        # 1. CHECK IF IT IS A PDF
+        content_type = response.headers.get('Content-Type', '').lower()
+        if url.lower().endswith('.pdf') or 'application/pdf' in content_type:
+            try:
+                with pdfplumber.open(io.BytesIO(response.content)) as pdf:
+                    all_text = ""
+                    # Limit to first 50 pages to prevent timeout on large Annual Reports
+                    for page in pdf.pages[:50]:
+                        txt = page.extract_text()
+                        if txt: all_text += txt + "\n"
+                    return all_text if len(all_text) > 0 else "⚠️ PDF downloaded but no text found (it might be scanned/image-based)."
+            except Exception as e:
+                return f"Error parsing PDF URL: {e}"
+
+        # 2. IF NOT PDF, TREAT AS WEBPAGE (HTML)
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        # 2. Remove "Junk" elements (Menus, Footers, Ads, Scripts)
+        # Remove Junk
         for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form', 'noscript', 'iframe']):
             element.decompose()
 
-        # 3. Try to find the "Main" content area first
+        # Find Content
         content_area = soup.find('main') or soup.find('article') or soup.find('div', {'role': 'main'}) or soup.find('div', class_=re.compile(r'content|body|article'))
         
-        # If no specific main area found, use the whole body
         if not content_area:
             content_area = soup.body
 
-        # 4. Extract text with proper spacing
         if content_area:
             text = content_area.get_text(separator=' ', strip=True)
-            # Filter out very short lines (often menu items that survived)
             lines = [line for line in text.split('\n') if len(line) > 50] 
             clean_text = " ".join(lines)
             
-            # Fallback if filtering removed everything
             if len(clean_text) < 200: 
                 clean_text = content_area.get_text(separator=' ', strip=True)
                 
@@ -83,7 +95,7 @@ def find_value_in_text(text, keywords):
             except: continue
     return 0.0
 
-# --- Helper: Smart Column Mapper (Sheet-Smart Version) ---
+# --- Helper: Smart Column Mapper ---
 def smart_map_columns(df):
     df.columns = df.columns.astype(str).str.strip().str.replace('\n', ' ')
     mapping_rules = {
@@ -313,12 +325,15 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
                 score = row['Forensic_Score']
                 if score > 50: st.error(f"**Verdict:** {row['Verdict']} (Score: {score})")
                 else: st.success(f"**Verdict:** {row['Verdict']} (Score: {score})")
+                
+                st.markdown("#### **📝 Interpretation:**")
                 if row['Detailed_Report']:
                     for line in row['Detailed_Report']: st.markdown(f"- {line}")
-                else: st.markdown("- ✅ Financials appear robust.")
+                else:
+                    st.markdown("- ✅ Financials appear robust with no major red flags.")
 
 # ==========================================
-# MODULE 3: SENTIMENT SCANNER (IMPROVED)
+# MODULE 3: SENTIMENT SCANNER (PDF & WEB SUPPORT)
 # ==========================================
 elif app_mode == "3. Qualitative Sentiment Scanner":
     st.header("🧠 Qualitative Sentiment Scanner")
@@ -331,16 +346,17 @@ elif app_mode == "3. Qualitative Sentiment Scanner":
         user_text = st.text_area("Paste MD&A / Director's Report here:", height=200, placeholder="e.g. 'Despite headwinds, we remain optimistic...'")
         
     elif input_method == "🌐 Paste URL":
-        url = st.text_input("Enter URL (News Article / Blog / Report):", placeholder="https://finance.yahoo.com/news/...")
+        st.caption("Supports News Articles, Blogs, and online PDF Reports.")
+        url = st.text_input("Enter URL:", placeholder="https://finance.yahoo.com/news/... or .pdf link")
         if url:
             if st.button("Fetch Text from URL"):
-                with st.spinner("Scraping text..."):
+                with st.spinner("Fetching content... (PDFs may take 10-20s)"):
                     user_text = extract_url_text(url)
                     if "Error" in user_text:
                         st.error(user_text)
                     else:
-                        st.success("Text Fetched Successfully!")
-                        st.text_area("Fetched Content:", value=user_text, height=200)
+                        st.success(f"Successfully Fetched {len(user_text)} characters!")
+                        st.text_area("Fetched Content:", value=user_text[:2000] + "...", height=200)
 
     # 2. Analysis Logic
     if st.button("Run Sentiment Analysis"):
