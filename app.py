@@ -68,31 +68,44 @@ def extract_url_text(url):
             return "⚠️ No content found."
     except Exception as e: return f"⚠️ Network Error: {e}"
 
-# --- Helper: SMART VALUE FINDER (NEW) ---
+# --- Helper: SMART VALUE FINDER V3 (WIDE NET) ---
 def find_value_in_text(text, keywords):
+    best_guess = 0.0
+    
     for keyword in keywords:
-        # Case insensitive search
+        # 1. Find the keyword in the messy text
         pattern = re.compile(re.escape(keyword), re.IGNORECASE)
         match = pattern.search(text)
         
         if match:
-            # Look at the "Window" of text AFTER the keyword (next 150 chars)
+            # 2. Grab a HUGE chunk of text after the keyword (800 chars to cover wide tables)
             start_idx = match.end()
-            end_idx = min(len(text), start_idx + 150)
+            end_idx = min(len(text), start_idx + 800)
             window_text = text[start_idx:end_idx]
             
-            # Find all numbers in this window (e.g., 28,000.00 or 500)
-            # Regex logic: Match numbers with commas/decimals, but exclude "Note 23" type small integers
-            numbers = re.findall(r'(?<!Note\s)(?<!\d)[\d,]+\.\d{2}|(?<!Note\s)(?<!\d)[\d,]{2,}', window_text)
+            # 3. Find ALL numbers in that chunk
+            # Matches: 10,000.00 | 500 | 12.5
+            numbers = re.findall(r'[\d,]+\.\d+|[\d,]+', window_text)
             
-            # Filter and Return the first valid large number found
+            candidates = []
             for num_str in numbers:
                 try:
-                    val = float(num_str.replace(',', ''))
-                    if val > 100:  # Ignore small numbers like dates (2024) or Note numbers (34)
-                        return val
-                except: continue
-    return 0.0
+                    # Clean the number (remove commas)
+                    clean_num = num_str.replace(',', '')
+                    val = float(clean_num)
+                    
+                    # Filter out Years (2023, 2024) and small Note numbers (<100)
+                    if val > 100 and val not in [2022, 2023, 2024, 2025]:
+                        candidates.append(val)
+                except:
+                    continue
+            
+            # 4. Heuristic: The financial value is usually the LARGEST number in the row
+            # (e.g. Note 5 | Year 2024 | Value 50,000 -> 50,000 is max)
+            if candidates:
+                return max(candidates)
+                
+    return best_guess
 
 # --- Helper: Smart Column Mapper ---
 def smart_map_columns(df):
@@ -162,31 +175,33 @@ def calculate_risk(df):
 # ==========================================
 if app_mode == "1. Quantitative Forensic Scorecard":
     st.header("📊 Module 1: Quantitative Analysis")
-    # (Keeping Module 1 simple for brevity as you are testing Module 2)
     st.info("Please go to Module 2 to test PDF Extraction.")
 
 # ==========================================
-# MODULE 2: PDF SCANNER (IMPROVED)
+# MODULE 2: PDF SCANNER (IMPROVED V3)
 # ==========================================
 elif app_mode == "2. Single Company Auto-Analysis (PDF)":
     st.header("⚡ Single Company Deep Dive")
-    st.info("Upload an Annual Report PDF. The tool will scan for Keywords and extract adjacent financial values.")
+    st.info("Upload an Annual Report PDF. The tool will scan for Keywords and extract values.")
     
     pdf_file = st.file_uploader("Upload Annual Report", type=["pdf"])
     
     if pdf_file:
-        with st.spinner("Scanning PDF tables..."):
+        with st.spinner("Scanning PDF tables... (Using Wide-Net Search)"):
             text = extract_pdf_text(pdf_file)
             
+            # --- DEBUG VIEW ---
+            with st.expander("🛠️ Debug: View Raw Extracted Text"):
+                st.text(text[:5000]) # Show first 5000 chars for user to check
+            
             # --- IMPROVED KEYWORD LIST ---
-            # We use list of lists. If first keyword fails, it tries the second.
             detected = {
                 'Company': ['Detected Company'], 
                 'Pledge_Pct': [find_value_in_text(text, ['Shares Pledged', 'Encumbered', 'Promoter Pledge'])],
-                'Sales': [find_value_in_text(text, ['Revenue from Operations', 'Total Income', 'Sale of Products'])],
+                'Sales': [find_value_in_text(text, ['Revenue from Operations', 'Total Income', 'Sale of Products', 'Turnover'])],
                 'Receivables': [find_value_in_text(text, ['Trade Receivables', 'Current Trade Receivables', 'Debtors'])],
                 'Inventory': [find_value_in_text(text, ['Inventories', 'Stock-in-trade'])],
-                'CFO': [find_value_in_text(text, ['Net Cash from Operating', 'Net cash generated from operating'])],
+                'CFO': [find_value_in_text(text, ['Net Cash from Operating', 'Net cash generated from operating', 'Cash flow from operating'])],
                 'EBITDA': [find_value_in_text(text, ['EBITDA', 'Profit before tax', 'Operating Profit'])],
                 'Total_Assets': [find_value_in_text(text, ['Total Assets', 'Total Equity and Liabilities'])],
                 'Non_Current_Assets': [find_value_in_text(text, ['Non-current assets', 'Total Non-Current Assets'])],
@@ -194,8 +209,9 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
             }
             
             st.success("Extraction Complete! Verify numbers below.")
+            st.caption("ℹ️ Note: If values are 0, the PDF format might be image-based or tables are too complex. Please type manually.")
             
-            # Allow user to edit because OCR is never 100% perfect
+            # Allow user to edit
             verified_df = st.data_editor(pd.DataFrame(detected))
             
             if st.button("Analyze PDF Data"):
@@ -217,7 +233,6 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
 # MODULE 3: SENTIMENT SCANNER
 # ==========================================
 elif app_mode == "3. Qualitative Sentiment Scanner":
-    # (Keeping Session State logic from previous fix)
     st.header("🧠 Qualitative Sentiment Scanner")
     if 'sentiment_text' not in st.session_state: st.session_state['sentiment_text'] = ""
     
