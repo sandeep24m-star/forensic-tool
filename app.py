@@ -4,6 +4,8 @@ import plotly.express as px
 from textblob import TextBlob
 import pdfplumber
 import re
+import requests
+from bs4 import BeautifulSoup
 
 # --- Page Config ---
 st.set_page_config(page_title="Forensic Engine Ultimate", layout="wide")
@@ -25,7 +27,7 @@ with st.sidebar:
     # Manual Header Row Selector
     header_row_val = st.number_input("Header Row Number (in Excel)", min_value=1, value=1, step=1, help="If columns aren't detecting, try changing this to 2 or 3.") - 1
 
-# --- Helper: Extract Text ---
+# --- Helper: Extract Text from PDF ---
 def extract_pdf_text(uploaded_file):
     all_text = ""
     with pdfplumber.open(uploaded_file) as pdf:
@@ -33,6 +35,18 @@ def extract_pdf_text(uploaded_file):
             text = page.extract_text()
             if text: all_text += text + "\n"
     return all_text
+
+# --- Helper: Extract Text from URL ---
+def extract_url_text(url):
+    try:
+        response = requests.get(url, timeout=10)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        # Extract text from paragraphs to avoid menus/footers
+        paragraphs = soup.find_all('p')
+        text = " ".join([p.get_text() for p in paragraphs])
+        return text
+    except Exception as e:
+        return f"Error: {e}"
 
 # --- Helper: Regex Search ---
 def find_value_in_text(text, keywords):
@@ -321,9 +335,11 @@ if app_mode == "1. Quantitative Forensic Scorecard":
         st.subheader("3. 🔍 Detailed Interpretation & Verdicts")
         st.info("Select a company below to read the AI-generated forensic interpretation.")
         
+        # --- DROPDOWN LOGIC FIXED ---
         company_list = res['Company'].unique()
         selected_company = st.selectbox("Select Company for Deep Dive:", company_list)
         
+        # Get data for selected company
         comp_data = res[res['Company'] == selected_company].iloc[0]
         
         with st.container():
@@ -361,6 +377,7 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
     if pdf_file:
         with st.spinner("Scanning..."):
             text = extract_pdf_text(pdf_file)
+            st.success("PDF Scanned Successfully!")
             detected = {
                 'Company': ['Detected Company'], 
                 'Pledge_Pct': [find_value_in_text(text, ['Shares Pledged', 'Encumbered', 'Pledge'])],
@@ -374,7 +391,7 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
                 'RPT_Vol': [find_value_in_text(text, ['Related Party', 'RPT'])]
             }
             verified_df = st.data_editor(pd.DataFrame(detected))
-            if st.button("Analyze"):
+            if st.button("Analyze PDF Data"):
                 res, _ = calculate_risk(verified_df)
                 row = res.iloc[0]
                 st.write("---")
@@ -389,33 +406,75 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
                     st.markdown("- ✅ Financials appear robust with no major red flags.")
 
 # ==========================================
-# MODULE 3: SENTIMENT SCANNER
+# MODULE 3: SENTIMENT SCANNER (UPDATED)
 # ==========================================
 elif app_mode == "3. Qualitative Sentiment Scanner":
     st.header("🧠 Qualitative Sentiment Scanner")
-    st.info("💡 **What text should I paste here?**")
-    st.markdown("""
-    **Recommended Sources:**
-    1. **MD&A:** "Risks and Concerns", "Outlook".
-    2. **Director's Report:** "State of Company Affairs".
-    """)
-    txt = st.text_area("Paste Text Here", height=200, placeholder="Example: 'Despite the challenging market conditions...'")
-    if st.button("Scan Text"):
-        if len(txt) > 50:
-            blob = TextBlob(txt)
-            sent, subj = blob.sentiment.polarity, blob.sentiment.subjectivity
+    st.info("Analyze the 'Tone' of Management Disclosures.")
+    
+    # 1. Input Method Toggle
+    input_method = st.radio("Choose Input Method:", ["📝 Paste Text", "🌐 Paste URL"], horizontal=True)
+    
+    user_text = ""
+    
+    if input_method == "📝 Paste Text":
+        user_text = st.text_area("Paste MD&A / Director's Report here:", height=200, placeholder="e.g. 'Despite headwinds, we remain optimistic...'")
+        
+    elif input_method == "🌐 Paste URL":
+        url = st.text_input("Enter URL (News Article / Blog / Report):", placeholder="https://finance.yahoo.com/news/...")
+        if url:
+            if st.button("Fetch Text from URL"):
+                with st.spinner("Scraping text..."):
+                    user_text = extract_url_text(url)
+                    if "Error" in user_text:
+                        st.error(user_text)
+                    else:
+                        st.success("Text Fetched Successfully!")
+                        with st.expander("View Fetched Text"):
+                            st.write(user_text[:1000] + "...")
+
+    # 2. Analysis Logic
+    if st.button("Run Sentiment Analysis"):
+        if len(user_text) > 50:
+            blob = TextBlob(user_text)
+            sent = blob.sentiment.polarity       # -1 to +1
+            subj = blob.sentiment.subjectivity   # 0 to 1
+            
             st.write("---")
-            st.subheader("📝 Textual Interpretation")
-            interpretation = ""
-            if subj > 0.5 and sent > 0.1:
-                interpretation = "🔴 **The Pollyanna Effect:** Management is using highly **subjective (vague)** and **optimistic** language."
-            elif sent < -0.05:
-                interpretation = "🟢 **Honest/Cautious:** The tone is negative or neutral."
+            st.subheader("📝 Forensic Interpretation")
+            
+            # Robust Verdict Logic
+            col1, col2 = st.columns(2)
+            col1.metric("Positivity (Sentiment)", f"{sent:.2f}", help="-1 (Negative) to +1 (Positive)")
+            col2.metric("Vagueness (Subjectivity)", f"{subj:.2f}", help="0 (Fact) to 1 (Opinion)")
+            
+            st.markdown("### **💡 AI Verdict:**")
+            
+            # Quadrant Analysis
+            if subj > 0.5 and sent > 0.2:
+                st.error("🔴 **Verdict: The Pollyanna Effect (High Risk)**")
+                st.markdown("Management is using **highly vague** and **excessively optimistic** language. This is a classic sign of 'Sugarcoating' to hide poor performance.")
+            
+            elif subj > 0.5 and sent < -0.2:
+                st.warning("🟠 **Verdict: Panicked Obfuscation (Moderate Risk)**")
+                st.markdown("The text is negative and highly subjective. Management sounds emotional or defensive rather than sticking to hard facts.")
+                
+            elif subj < 0.4 and sent > 0.2:
+                st.success("🟢 **Verdict: Strong & Objective (Low Risk)**")
+                st.markdown("The optimism is grounded in low subjectivity. This suggests the good news is backed by facts/numbers.")
+                
+            elif subj < 0.4 and sent < -0.2:
+                st.info("🔵 **Verdict: Honest Distress (Safe Narrative)**")
+                st.markdown("The management is delivering bad news straightforwardly without trying to sugarcoat it. This indicates honesty.")
+            
             else:
-                interpretation = "🟡 **Neutral:** The language is balanced."
-            st.markdown(f"**Analysis Verdict:** {interpretation}")
-            c1, c2 = st.columns(2)
-            c1.metric("Vagueness", f"{subj:.2f}")
-            c2.metric("Sentiment", f"{sent:.2f}")
+                st.info("⚪ **Verdict: Neutral / Balanced**")
+                st.markdown("The text contains a standard mix of facts and opinions.")
+
         else:
-            st.warning("Please paste at least 50 characters.")
+            if input_method == "🌐 Paste URL" and not url:
+                st.warning("Please enter a URL first.")
+            elif input_method == "🌐 Paste URL" and url and not user_text:
+                st.warning("Please click 'Fetch Text from URL' first.")
+            else:
+                st.warning("Please provide at least 50 characters of text for analysis.")
