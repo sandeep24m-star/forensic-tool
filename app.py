@@ -63,7 +63,6 @@ def smart_map_columns(df):
     }
     
     new_columns = {}
-    found_cols = []
     
     st.write("---")
     st.markdown("### 🧬 Auto-Column Detection")
@@ -95,7 +94,6 @@ def smart_map_columns(df):
             
             if selected != "(Select Column)":
                 new_columns[selected] = standard_name
-                found_cols.append(standard_name)
 
     if new_columns:
         df_mapped = df.rename(columns=new_columns)
@@ -256,16 +254,10 @@ if app_mode == "1. Quantitative Forensic Scorecard":
         for i, grp in enumerate(sorted_groups):
             cols[i+1].metric(grp, counts[grp])
 
-        # --- NEW VISUALIZATION SECTION ---
+        # --- NEW VISUALIZATION SECTION (TABS) ---
         st.write("---")
         st.subheader("2. Hypothesis Testing (Visualizer)")
         
-        viz_type = st.radio(
-            "Select Chart Type:", 
-            ["📦 Box Plot (Best for Distribution)", "📊 Bar Chart (Simple Averages)", "📍 Strip Plot (Granular View)", "⚪ Scatter Plot (Original)"],
-            horizontal=True
-        )
-
         color_map = {
             "🔴 Critical (>50%)": "#FF4B4B",
             "🟡 Moderate (10-50%)": "#FFA500", 
@@ -273,57 +265,65 @@ if app_mode == "1. Quantitative Forensic Scorecard":
             "🟢 Control (<50%)": "#00CC96"
         }
 
-        if "Box Plot" in viz_type:
-            fig = px.box(
+        # Create Tabs for easier navigation
+        tab1, tab2, tab3, tab4 = st.tabs(["⚪ Scatter Plot", "📦 Box Plot", "📊 Bar Chart", "📍 Strip Plot"])
+
+        with tab1:
+            st.markdown("**Scatter Plot:** Shows correlation between Pledge % and DSO.")
+            fig1 = px.scatter(
+                res, x="Pledge_Pct", y="DSO", color="Risk_Group",
+                size="Sales", hover_name="Company", hover_data=["Forensic_Score"],
+                color_discrete_map=color_map,
+                title=f"Hypothesis Test: Pledge vs DSO (N={len(res)})"
+            )
+            fig1.add_hline(y=120, line_dash="dash", line_color="red", annotation_text="High Risk (120 Days)")
+            st.plotly_chart(fig1, use_container_width=True)
+
+        with tab2:
+            st.markdown("**Box Plot:** Shows the spread and outliers in each risk group.")
+            fig2 = px.box(
                 res, x="Risk_Group", y="DSO", color="Risk_Group",
                 color_discrete_map=color_map,
-                points="all", # Shows individual dots next to the box
+                points="all", 
                 title="Distribution of DSO across Risk Groups",
                 hover_data=["Company", "Sales"]
             )
-        
-        elif "Bar Chart" in viz_type:
-            # Aggregate data for bar chart
+            fig2.add_hline(y=120, line_dash="dash", line_color="red")
+            st.plotly_chart(fig2, use_container_width=True)
+
+        with tab3:
+            st.markdown("**Bar Chart:** Shows the simple average DSO for each group.")
             avg_df = res.groupby("Risk_Group")['DSO'].mean().reset_index()
-            fig = px.bar(
+            fig3 = px.bar(
                 avg_df, x="Risk_Group", y="DSO", color="Risk_Group",
                 color_discrete_map=color_map,
                 text_auto=True,
-                title="Average DSO by Risk Group (The Staircase Effect)"
+                title="Average DSO by Risk Group"
             )
-            fig.update_layout(yaxis_title="Average Days Sales Outstanding")
-
-        elif "Strip Plot" in viz_type:
-            fig = px.strip(
+            fig3.update_layout(yaxis_title="Average Days Sales Outstanding")
+            fig3.add_hline(y=120, line_dash="dash", line_color="red")
+            st.plotly_chart(fig3, use_container_width=True)
+            
+        with tab4:
+            st.markdown("**Strip Plot:** Shows individual companies in vertical lanes.")
+            fig4 = px.strip(
                 res, x="Risk_Group", y="DSO", color="Risk_Group",
                 color_discrete_map=color_map,
                 hover_name="Company",
                 title="Individual Company Risk Position (Jittered)",
                 stripmode='overlay'
             )
-
-        else: # Original Scatter
-            fig = px.scatter(
-                res, x="Pledge_Pct", y="DSO", color="Risk_Group",
-                size="Sales", hover_name="Company", hover_data=["Forensic_Score"],
-                color_discrete_map=color_map,
-                title=f"Hypothesis Test: Pledge vs DSO (N={len(res)})"
-            )
-
-        # Add the Risk Threshold Line to all charts
-        fig.add_hline(y=120, line_dash="dash", line_color="red", annotation_text="High Risk (120 Days)")
-        st.plotly_chart(fig, use_container_width=True)
+            fig4.add_hline(y=120, line_dash="dash", line_color="red")
+            st.plotly_chart(fig4, use_container_width=True)
 
         # B. DETAILED DRILL DOWN
         st.write("---")
         st.subheader("3. 🔍 Detailed Interpretation & Verdicts")
         st.info("Select a company below to read the AI-generated forensic interpretation.")
         
-        # --- DROPDOWN LOGIC FIXED ---
         company_list = res['Company'].unique()
         selected_company = st.selectbox("Select Company for Deep Dive:", company_list)
         
-        # Get data for selected company
         comp_data = res[res['Company'] == selected_company].iloc[0]
         
         with st.container():
