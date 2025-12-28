@@ -36,17 +36,42 @@ def extract_pdf_text(uploaded_file):
             if text: all_text += text + "\n"
     return all_text
 
-# --- Helper: Extract Text from URL ---
+# --- Helper: Extract Text from URL (IMPROVED) ---
 def extract_url_text(url):
     try:
-        response = requests.get(url, timeout=10)
+        # 1. Mimic a real browser to avoid 403 Forbidden errors
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(response.content, 'html.parser')
-        # Extract text from paragraphs to avoid menus/footers
-        paragraphs = soup.find_all('p')
-        text = " ".join([p.get_text() for p in paragraphs])
-        return text
+
+        # 2. Remove "Junk" elements (Menus, Footers, Ads, Scripts)
+        for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form', 'noscript', 'iframe']):
+            element.decompose()
+
+        # 3. Try to find the "Main" content area first
+        content_area = soup.find('main') or soup.find('article') or soup.find('div', {'role': 'main'}) or soup.find('div', class_=re.compile(r'content|body|article'))
+        
+        # If no specific main area found, use the whole body
+        if not content_area:
+            content_area = soup.body
+
+        # 4. Extract text with proper spacing
+        if content_area:
+            text = content_area.get_text(separator=' ', strip=True)
+            # Filter out very short lines (often menu items that survived)
+            lines = [line for line in text.split('\n') if len(line) > 50] 
+            clean_text = " ".join(lines)
+            
+            # Fallback if filtering removed everything
+            if len(clean_text) < 200: 
+                clean_text = content_area.get_text(separator=' ', strip=True)
+                
+            return clean_text
+        else:
+            return "⚠️ Error: Could not find readable text on this page."
+
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error fetching URL: {e}"
 
 # --- Helper: Regex Search ---
 def find_value_in_text(text, keywords):
@@ -60,9 +85,7 @@ def find_value_in_text(text, keywords):
 
 # --- Helper: Smart Column Mapper (Sheet-Smart Version) ---
 def smart_map_columns(df):
-    # 1. Clean the headers (Remove spaces, newlines, and convert to string)
     df.columns = df.columns.astype(str).str.strip().str.replace('\n', ' ')
-    
     mapping_rules = {
         'Company': ['company', 'entity', 'name', 'firm'],
         'Pledge_Pct': ['pledge', 'encumbered', 'promoter pledge', 'pledged'],
@@ -77,52 +100,41 @@ def smart_map_columns(df):
     }
     
     new_columns = {}
-    
     st.write("---")
     st.markdown("### 🧬 Auto-Column Detection")
     st.caption("Scanning headers... If incorrect, select manually below.")
-    
     cols_ui = st.columns(3)
     
     for i, (standard_name, variations) in enumerate(mapping_rules.items()):
         match_found = None
-        
-        # Smart Search: Case-insensitive partial match
         for col in df.columns:
             if any(v in col.lower() for v in variations):
                 match_found = col
                 break
-        
-        # Fallback exact match
         if not match_found and standard_name in df.columns:
             match_found = standard_name
             
         with cols_ui[i % 3]:
-            # Show the dropdown
             selected = st.selectbox(
                 f"Map to '{standard_name}'", 
                 options=["(Select Column)"] + list(df.columns),
                 index=list(df.columns).index(match_found) + 1 if match_found else 0,
                 key=f"map_{standard_name}"
             )
-            
             if selected != "(Select Column)":
                 new_columns[selected] = standard_name
 
     if new_columns:
         df_mapped = df.rename(columns=new_columns)
-        # Ensure missing columns are added as 0 to prevent crashes
         for req in mapping_rules.keys():
-            if req not in df_mapped.columns:
-                df_mapped[req] = 0
+            if req not in df_mapped.columns: df_mapped[req] = 0
         return df_mapped
     return df
 
 # --- Helper: Adaptive Risk Calculation ---
 def calculate_risk(df):
     cols = ['Sales', 'Receivables', 'Inventory', 'CFO', 'EBITDA', 'Pledge_Pct', 'Total_Assets', 'Non_Current_Assets', 'RPT_Vol']
-    for c in cols:
-        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+    for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
     df['DSO'] = df.apply(lambda x: (x['Receivables'] / x['Sales'] * 365) if x['Sales'] > 0 else 0, axis=1).round(1)
     df['Cash_Quality'] = df.apply(lambda x: (x['CFO'] / x['EBITDA']) if x['EBITDA'] > 0 else 0, axis=1).round(2)
@@ -145,39 +157,34 @@ def calculate_risk(df):
         score = 0
         obs = []
         verdict = "Low Risk"
-        
         if row['Pledge_Pct'] > 50:
             score += 25
-            obs.append(f"🔴 **Critical Pledge Pressure:** {row['Pledge_Pct']}% of shares are pledged.")
+            obs.append(f"🔴 **Critical Pledge Pressure:** {row['Pledge_Pct']}% pledged.")
         elif row['Pledge_Pct'] > 20:
             score += 10
             obs.append(f"🟠 **Moderate Pledge:** {row['Pledge_Pct']}% pledged.")
-
         if row['Cash_Quality'] < 0.5:
             score += 30
             obs.append(f"🔴 **Fake Profit Alert:** Cash Quality is {row['Cash_Quality']}.")
         elif row['Cash_Quality'] < 0.8:
             score += 15
-            obs.append(f"🟠 **Weak Cash Flow:** Cash conversion (CFO/EBITDA) is low.")
-
+            obs.append(f"🟠 **Weak Cash Flow:** Cash conversion low.")
         if row['DSO'] > 120:
             score += 20
             obs.append(f"🔴 **Aggressive Revenue:** Sales take {row['DSO']} days to collect.")
         if row['RPT_Intensity'] > 10:
             score += 10
             obs.append(f"⚠️ **Leakage Risk:** {row['RPT_Intensity']}% sales with Related Parties.")
-
-        if score >= 60: verdict = "🚨 HIGH PROBABILITY OF MANIPULATION"
-        elif score >= 35: verdict = "⚠️ MODERATE RISK - Monitor Closely"
-        else: verdict = "✅ LOW RISK - Clean Health"
         
+        if score >= 60: verdict = "🚨 HIGH PROBABILITY OF MANIPULATION"
+        elif score >= 35: verdict = "⚠️ MODERATE RISK"
+        else: verdict = "✅ LOW RISK"
         return score, verdict, obs
 
     results = df.apply(get_detailed_analysis, axis=1)
     df['Forensic_Score'] = [x[0] for x in results]
     df['Verdict'] = [x[1] for x in results]
     df['Detailed_Report'] = [x[2] for x in results]
-    
     return df, grouping_method
 
 # ==========================================
@@ -185,9 +192,7 @@ def calculate_risk(df):
 # ==========================================
 if app_mode == "1. Quantitative Forensic Scorecard":
     st.header("📊 Module 1: Quantitative Analysis")
-    
     input_type = st.radio("Select Data Source:", ["✍️ Manual Entry (Small Sample)", "📁 Upload Excel (Batch Analysis)"], horizontal=True)
-    
     df_in = None
     
     if input_type == "✍️ Manual Entry (Small Sample)":
@@ -208,165 +213,75 @@ if app_mode == "1. Quantitative Forensic Scorecard":
 
     elif input_type == "📁 Upload Excel (Batch Analysis)":
         up_file = st.file_uploader("Upload Excel/CSV", type=['xlsx', 'csv'])
-        
         if up_file:
             try:
-                # --- NEW LOGIC: FIND THE RIGHT SHEET AUTOMATICALLY ---
-                if up_file.name.endswith('.csv'):
-                    raw_df = pd.read_csv(up_file, header=header_row_val)
+                if up_file.name.endswith('.csv'): raw_df = pd.read_csv(up_file, header=header_row_val)
                 else:
-                    # 1. Load the Excel file wrapper
                     xls = pd.ExcelFile(up_file)
                     target_sheet = None
-                    
-                    # 2. Iterate through ALL sheets to find the one with data
                     for sheet in xls.sheet_names:
                         df_check = pd.read_excel(xls, sheet_name=sheet, nrows=5, header=header_row_val)
-                        # Check if this sheet has "Sales" or "Name" or "Pledge" columns
                         cols_lower = [str(c).lower() for c in df_check.columns]
-                        if any('sales' in c for c in cols_lower) or any('pledge' in c for c in cols_lower) or any('company' in c for c in cols_lower):
+                        if any('sales' in c for c in cols_lower) or any('pledge' in c for c in cols_lower):
                             target_sheet = sheet
                             break
-                    
                     if target_sheet:
-                        st.success(f"✅ Data detected in Sheet: '{target_sheet}' (Using Header Row {header_row_val + 1})")
+                        st.success(f"✅ Data detected in Sheet: '{target_sheet}' (Row {header_row_val + 1})")
                         raw_df = pd.read_excel(xls, sheet_name=target_sheet, header=header_row_val)
-                    else:
-                        st.warning("⚠️ Could not auto-detect data sheet. Loading the first sheet by default.")
-                        raw_df = pd.read_excel(xls, sheet_name=0, header=header_row_val)
-
-                # Run mapping
+                    else: raw_df = pd.read_excel(xls, sheet_name=0, header=header_row_val)
                 df_in = smart_map_columns(raw_df)
-                
-            except Exception as e:
-                st.error(f"❌ Error loading file: {e}")
+            except Exception as e: st.error(f"❌ Error loading file: {e}")
 
-    # --- SESSION STATE PERSISTENCE ---
     if st.button("Run Forensic Analysis"):
         if df_in is not None:
             res, method_used = calculate_risk(df_in)
-            # Store results in Session State
             st.session_state['results'] = res
             st.session_state['method'] = method_used
             st.session_state['data_loaded'] = True
-        else:
-            st.error("Please provide valid data.")
+        else: st.error("Please provide valid data.")
 
-    # --- DISPLAY RESULTS IF DATA IS LOADED ---
     if st.session_state.get('data_loaded'):
         res = st.session_state['results']
-        method_used = st.session_state['method']
         
-        st.write("---")
-        st.subheader(f"1. Sample Overview (Method: {method_used})")
-        
-        counts = res['Risk_Group'].value_counts()
-        cols = st.columns(len(counts) + 1)
-        cols[0].metric("Total Samples", len(res))
-        
-        sorted_groups = sorted(counts.index.tolist(), reverse=True)
-        for i, grp in enumerate(sorted_groups):
-            cols[i+1].metric(grp, counts[grp])
-
-        # --- NEW VISUALIZATION SECTION (TABS) ---
         st.write("---")
         st.subheader("2. Hypothesis Testing (Visualizer)")
         
-        color_map = {
-            "🔴 Critical (>50%)": "#FF4B4B",
-            "🟡 Moderate (10-50%)": "#FFA500", 
-            "🟢 Safe (<10%)": "#00CC96",
-            "🟢 Control (<50%)": "#00CC96"
-        }
-
-        # Create Tabs for easier navigation
         tab1, tab2, tab3, tab4 = st.tabs(["⚪ Scatter Plot", "📦 Box Plot", "📊 Bar Chart", "📍 Strip Plot"])
+        color_map = {"🔴 Critical (>50%)": "#FF4B4B", "🟡 Moderate (10-50%)": "#FFA500", "🟢 Safe (<10%)": "#00CC96", "🟢 Control (<50%)": "#00CC96"}
 
         with tab1:
-            st.markdown("**Scatter Plot:** Shows correlation between Pledge % and DSO.")
-            fig1 = px.scatter(
-                res, x="Pledge_Pct", y="DSO", color="Risk_Group",
-                size="Sales", hover_name="Company", hover_data=["Forensic_Score"],
-                color_discrete_map=color_map,
-                title=f"Hypothesis Test: Pledge vs DSO (N={len(res)})"
-            )
-            fig1.add_hline(y=120, line_dash="dash", line_color="red", annotation_text="High Risk (120 Days)")
+            fig1 = px.scatter(res, x="Pledge_Pct", y="DSO", color="Risk_Group", size="Sales", hover_name="Company", color_discrete_map=color_map, title="Pledge vs DSO")
+            fig1.add_hline(y=120, line_dash="dash", line_color="red")
             st.plotly_chart(fig1, use_container_width=True)
-
         with tab2:
-            st.markdown("**Box Plot:** Shows the spread and outliers in each risk group.")
-            fig2 = px.box(
-                res, x="Risk_Group", y="DSO", color="Risk_Group",
-                color_discrete_map=color_map,
-                points="all", 
-                title="Distribution of DSO across Risk Groups",
-                hover_data=["Company", "Sales"]
-            )
+            fig2 = px.box(res, x="Risk_Group", y="DSO", color="Risk_Group", color_discrete_map=color_map, points="all", title="Distribution of DSO")
             fig2.add_hline(y=120, line_dash="dash", line_color="red")
             st.plotly_chart(fig2, use_container_width=True)
-
         with tab3:
-            st.markdown("**Bar Chart:** Shows the simple average DSO for each group.")
             avg_df = res.groupby("Risk_Group")['DSO'].mean().reset_index()
-            fig3 = px.bar(
-                avg_df, x="Risk_Group", y="DSO", color="Risk_Group",
-                color_discrete_map=color_map,
-                text_auto=True,
-                title="Average DSO by Risk Group"
-            )
-            fig3.update_layout(yaxis_title="Average Days Sales Outstanding")
+            fig3 = px.bar(avg_df, x="Risk_Group", y="DSO", color="Risk_Group", color_discrete_map=color_map, text_auto=True, title="Average DSO")
             fig3.add_hline(y=120, line_dash="dash", line_color="red")
             st.plotly_chart(fig3, use_container_width=True)
-            
         with tab4:
-            st.markdown("**Strip Plot:** Shows individual companies in vertical lanes.")
-            fig4 = px.strip(
-                res, x="Risk_Group", y="DSO", color="Risk_Group",
-                color_discrete_map=color_map,
-                hover_name="Company",
-                title="Individual Company Risk Position (Jittered)",
-                stripmode='overlay'
-            )
+            fig4 = px.strip(res, x="Risk_Group", y="DSO", color="Risk_Group", color_discrete_map=color_map, hover_name="Company", title="Risk Position")
             fig4.add_hline(y=120, line_dash="dash", line_color="red")
             st.plotly_chart(fig4, use_container_width=True)
 
-        # B. DETAILED DRILL DOWN
         st.write("---")
-        st.subheader("3. 🔍 Detailed Interpretation & Verdicts")
-        st.info("Select a company below to read the AI-generated forensic interpretation.")
-        
-        # --- DROPDOWN LOGIC FIXED ---
+        st.subheader("3. 🔍 Detailed Interpretation")
         company_list = res['Company'].unique()
-        selected_company = st.selectbox("Select Company for Deep Dive:", company_list)
-        
-        # Get data for selected company
+        selected_company = st.selectbox("Select Company:", company_list)
         comp_data = res[res['Company'] == selected_company].iloc[0]
         
         with st.container():
             st.markdown(f"### 🏢 **{comp_data['Company']}**")
-            
             score = comp_data['Forensic_Score']
-            if score > 50:
-                st.error(f"**Final Verdict:** {comp_data['Verdict']} (Score: {score}/100)")
-            else:
-                st.success(f"**Final Verdict:** {comp_data['Verdict']} (Score: {score}/100)")
-                
-            st.markdown("#### **📝 Interpretation of Results:**")
-            if comp_data['Detailed_Report']:
-                for line in comp_data['Detailed_Report']:
-                    st.markdown(f"- {line}")
-            else:
-                st.markdown("- ✅ No critical anomalies detected in the quantitative data.")
-                st.markdown("- ✅ Cash Quality and Working Capital cycles appear within healthy ranges.")
+            if score > 50: st.error(f"**Final Verdict:** {comp_data['Verdict']} (Score: {score})")
+            else: st.success(f"**Final Verdict:** {comp_data['Verdict']} (Score: {score})")
             
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Pledge %", f"{comp_data['Pledge_Pct']}%")
-            k2.metric("DSO (Days)", comp_data['DSO'])
-            k3.metric("Cash Quality", comp_data['Cash_Quality'])
-            k4.metric("RPT Intensity", f"{comp_data['RPT_Intensity']}%")
-
-        with st.expander("View Raw Data Table"):
-            st.dataframe(res)
+            if comp_data['Detailed_Report']:
+                for line in comp_data['Detailed_Report']: st.markdown(f"- {line}")
+            else: st.markdown("- ✅ No critical anomalies.")
 
 # ==========================================
 # MODULE 2: PDF SCANNER
@@ -398,23 +313,18 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
                 score = row['Forensic_Score']
                 if score > 50: st.error(f"**Verdict:** {row['Verdict']} (Score: {score})")
                 else: st.success(f"**Verdict:** {row['Verdict']} (Score: {score})")
-                
-                st.markdown("#### **📝 Interpretation:**")
                 if row['Detailed_Report']:
                     for line in row['Detailed_Report']: st.markdown(f"- {line}")
-                else:
-                    st.markdown("- ✅ Financials appear robust with no major red flags.")
+                else: st.markdown("- ✅ Financials appear robust.")
 
 # ==========================================
-# MODULE 3: SENTIMENT SCANNER (UPDATED)
+# MODULE 3: SENTIMENT SCANNER (IMPROVED)
 # ==========================================
 elif app_mode == "3. Qualitative Sentiment Scanner":
     st.header("🧠 Qualitative Sentiment Scanner")
     st.info("Analyze the 'Tone' of Management Disclosures.")
     
-    # 1. Input Method Toggle
     input_method = st.radio("Choose Input Method:", ["📝 Paste Text", "🌐 Paste URL"], horizontal=True)
-    
     user_text = ""
     
     if input_method == "📝 Paste Text":
@@ -430,51 +340,37 @@ elif app_mode == "3. Qualitative Sentiment Scanner":
                         st.error(user_text)
                     else:
                         st.success("Text Fetched Successfully!")
-                        with st.expander("View Fetched Text"):
-                            st.write(user_text[:1000] + "...")
+                        st.text_area("Fetched Content:", value=user_text, height=200)
 
     # 2. Analysis Logic
     if st.button("Run Sentiment Analysis"):
         if len(user_text) > 50:
             blob = TextBlob(user_text)
-            sent = blob.sentiment.polarity       # -1 to +1
-            subj = blob.sentiment.subjectivity   # 0 to 1
+            sent = blob.sentiment.polarity
+            subj = blob.sentiment.subjectivity
             
             st.write("---")
             st.subheader("📝 Forensic Interpretation")
-            
-            # Robust Verdict Logic
             col1, col2 = st.columns(2)
             col1.metric("Positivity (Sentiment)", f"{sent:.2f}", help="-1 (Negative) to +1 (Positive)")
             col2.metric("Vagueness (Subjectivity)", f"{subj:.2f}", help="0 (Fact) to 1 (Opinion)")
             
             st.markdown("### **💡 AI Verdict:**")
-            
-            # Quadrant Analysis
             if subj > 0.5 and sent > 0.2:
-                st.error("🔴 **Verdict: The Pollyanna Effect (High Risk)**")
-                st.markdown("Management is using **highly vague** and **excessively optimistic** language. This is a classic sign of 'Sugarcoating' to hide poor performance.")
-            
+                st.error("🔴 **The Pollyanna Effect (High Risk):** Vague & Overly Optimistic.")
             elif subj > 0.5 and sent < -0.2:
-                st.warning("🟠 **Verdict: Panicked Obfuscation (Moderate Risk)**")
-                st.markdown("The text is negative and highly subjective. Management sounds emotional or defensive rather than sticking to hard facts.")
-                
+                st.warning("🟠 **Panicked Obfuscation:** Negative & Highly Subjective.")
             elif subj < 0.4 and sent > 0.2:
-                st.success("🟢 **Verdict: Strong & Objective (Low Risk)**")
-                st.markdown("The optimism is grounded in low subjectivity. This suggests the good news is backed by facts/numbers.")
-                
+                st.success("🟢 **Strong & Objective:** Optimism backed by facts.")
             elif subj < 0.4 and sent < -0.2:
-                st.info("🔵 **Verdict: Honest Distress (Safe Narrative)**")
-                st.markdown("The management is delivering bad news straightforwardly without trying to sugarcoat it. This indicates honesty.")
-            
+                st.info("🔵 **Honest Distress:** Bad news delivered directly.")
             else:
-                st.info("⚪ **Verdict: Neutral / Balanced**")
-                st.markdown("The text contains a standard mix of facts and opinions.")
+                st.info("⚪ **Neutral:** Balanced language.")
 
         else:
             if input_method == "🌐 Paste URL" and not url:
-                st.warning("Please enter a URL first.")
+                st.warning("Enter a URL first.")
             elif input_method == "🌐 Paste URL" and url and not user_text:
-                st.warning("Please click 'Fetch Text from URL' first.")
+                st.warning("Click 'Fetch Text' first.")
             else:
-                st.warning("Please provide at least 50 characters of text for analysis.")
+                st.warning("Please provide at least 50 characters.")
