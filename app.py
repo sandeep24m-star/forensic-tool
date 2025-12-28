@@ -39,8 +39,11 @@ def find_value_in_text(text, keywords):
             except: continue
     return 0.0
 
-# --- Helper: Smart Column Mapper ---
+# --- Helper: Smart Column Mapper (Fixed Version) ---
 def smart_map_columns(df):
+    # 1. Clean the headers (Remove spaces, newlines, and convert to string)
+    df.columns = df.columns.astype(str).str.strip().str.replace('\n', ' ')
+    
     mapping_rules = {
         'Company': ['company', 'entity', 'name', 'firm'],
         'Pledge_Pct': ['pledge', 'encumbered', 'promoter pledge', 'pledged'],
@@ -59,21 +62,25 @@ def smart_map_columns(df):
     
     st.write("---")
     st.markdown("### 🧬 Auto-Column Detection")
-    st.caption("The tool is scanning your Excel headers to match required fields...")
+    st.caption("Scanning Excel headers... If incorrect, select manually below.")
     
-    cols_ui = st.columns(4)
+    cols_ui = st.columns(3)
     
     for i, (standard_name, variations) in enumerate(mapping_rules.items()):
         match_found = None
+        
+        # Smart Search: Case-insensitive partial match
         for col in df.columns:
             if any(v in col.lower() for v in variations):
                 match_found = col
                 break
         
+        # Fallback exact match
         if not match_found and standard_name in df.columns:
             match_found = standard_name
             
-        with cols_ui[i % 4]:
+        with cols_ui[i % 3]:
+            # Show the dropdown
             selected = st.selectbox(
                 f"Map to '{standard_name}'", 
                 options=["(Select Column)"] + list(df.columns),
@@ -87,13 +94,14 @@ def smart_map_columns(df):
 
     if new_columns:
         df_mapped = df.rename(columns=new_columns)
+        # Ensure missing columns are added as 0 to prevent crashes
         for req in mapping_rules.keys():
             if req not in df_mapped.columns:
                 df_mapped[req] = 0
         return df_mapped
     return df
 
-# --- Helper: Adaptive Risk Calculation & Narrative ---
+# --- Helper: Adaptive Risk Calculation ---
 def calculate_risk(df):
     cols = ['Sales', 'Receivables', 'Inventory', 'CFO', 'EBITDA', 'Pledge_Pct', 'Total_Assets', 'Non_Current_Assets', 'RPT_Vol']
     for c in cols:
@@ -183,12 +191,40 @@ if app_mode == "1. Quantitative Forensic Scorecard":
 
     elif input_type == "📁 Upload Excel (Batch Analysis)":
         up_file = st.file_uploader("Upload Excel/CSV", type=['xlsx', 'csv'])
+        
         if up_file:
-            if up_file.name.endswith('.csv'): raw_df = pd.read_csv(up_file)
-            else: raw_df = pd.read_excel(up_file)
-            df_in = smart_map_columns(raw_df)
+            try:
+                # --- NEW LOGIC: FIND THE CORRECT HEADER ROW ---
+                if up_file.name.endswith('.csv'):
+                    df_temp = pd.read_csv(up_file, header=None, nrows=10)
+                else:
+                    df_temp = pd.read_excel(up_file, header=None, nrows=10)
+                
+                # Scan first 10 rows to find keywords like "Sales" or "Profit"
+                header_row_index = 0
+                for i, row in df_temp.iterrows():
+                    row_str = row.astype(str).str.lower().tolist()
+                    # If a row contains 'sales' AND 'profit', it's likely the header
+                    if any('sales' in x for x in row_str) and any('profit' in x for x in row_str):
+                        header_row_index = i
+                        break
+                
+                # Reload the full file with the detected header row
+                up_file.seek(0) # Reset file pointer
+                if up_file.name.endswith('.csv'):
+                    raw_df = pd.read_csv(up_file, header=header_row_index)
+                else:
+                    raw_df = pd.read_excel(up_file, header=header_row_index)
+                
+                st.success(f"✅ File Loaded Successfully! (Detected Headers on Row {header_row_index + 1})")
+                
+                # Run mapping
+                df_in = smart_map_columns(raw_df)
+                
+            except Exception as e:
+                st.error(f"❌ Error loading file: {e}")
 
-    # --- KEY FIX: USING SESSION STATE FOR PERSISTENCE ---
+    # --- SESSION STATE PERSISTENCE (FIXES DROPDOWN BUG) ---
     if st.button("Run Forensic Analysis"):
         if df_in is not None:
             res, method_used = calculate_risk(df_in)
@@ -270,7 +306,7 @@ if app_mode == "1. Quantitative Forensic Scorecard":
             st.dataframe(res)
 
 # ==========================================
-# MODULE 2 & 3 (Keeping as is)
+# MODULE 2: PDF SCANNER
 # ==========================================
 elif app_mode == "2. Single Company Auto-Analysis (PDF)":
     st.header("⚡ Single Company Deep Dive")
@@ -305,6 +341,9 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
                 else:
                     st.markdown("- ✅ Financials appear robust with no major red flags.")
 
+# ==========================================
+# MODULE 3: SENTIMENT SCANNER
+# ==========================================
 elif app_mode == "3. Qualitative Sentiment Scanner":
     st.header("🧠 Qualitative Sentiment Scanner")
     st.info("💡 **What text should I paste here?**")
