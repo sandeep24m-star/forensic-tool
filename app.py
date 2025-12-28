@@ -68,44 +68,37 @@ def extract_url_text(url):
             return "⚠️ No content found."
     except Exception as e: return f"⚠️ Network Error: {e}"
 
-# --- Helper: SMART VALUE FINDER V3 (WIDE NET) ---
+# --- Helper: LINE-BASED VALUE FINDER (V4 - MOST ROBUST) ---
 def find_value_in_text(text, keywords):
-    best_guess = 0.0
+    lines = text.split('\n')
+    candidates = []
     
     for keyword in keywords:
-        # 1. Find the keyword in the messy text
-        pattern = re.compile(re.escape(keyword), re.IGNORECASE)
-        match = pattern.search(text)
-        
-        if match:
-            # 2. Grab a HUGE chunk of text after the keyword (800 chars to cover wide tables)
-            start_idx = match.end()
-            end_idx = min(len(text), start_idx + 800)
-            window_text = text[start_idx:end_idx]
-            
-            # 3. Find ALL numbers in that chunk
-            # Matches: 10,000.00 | 500 | 12.5
-            numbers = re.findall(r'[\d,]+\.\d+|[\d,]+', window_text)
-            
-            candidates = []
-            for num_str in numbers:
-                try:
-                    # Clean the number (remove commas)
-                    clean_num = num_str.replace(',', '')
-                    val = float(clean_num)
-                    
-                    # Filter out Years (2023, 2024) and small Note numbers (<100)
-                    if val > 100 and val not in [2022, 2023, 2024, 2025]:
-                        candidates.append(val)
-                except:
-                    continue
-            
-            # 4. Heuristic: The financial value is usually the LARGEST number in the row
-            # (e.g. Note 5 | Year 2024 | Value 50,000 -> 50,000 is max)
-            if candidates:
-                return max(candidates)
+        for i, line in enumerate(lines):
+            # Check if keyword exists in this line (Case Insensitive)
+            if keyword.lower() in line.lower():
                 
-    return best_guess
+                # Context: Look at THIS line and the NEXT line (in case value wraps)
+                search_text = line
+                if i + 1 < len(lines):
+                    search_text += " " + lines[i+1]
+                
+                # Regex to find numbers (formatted like 10,000.00 or 500)
+                # Ignores isolated small integers like "Note 2"
+                numbers = re.findall(r'(?<!Note\s)(?<!\d)[\d,]+\.\d{2}|(?<!Note\s)(?<!\d)[\d,]{3,}', search_text)
+                
+                for num_str in numbers:
+                    try:
+                        val = float(num_str.replace(',', ''))
+                        # Filter out Years and Note Numbers
+                        if val > 100 and val not in [2022, 2023, 2024, 2025]:
+                            candidates.append(val)
+                    except: continue
+                    
+    # Heuristic: If we found candidates, usually the largest number associated with the keyword is the value
+    if candidates:
+        return max(candidates)
+    return 0.0
 
 # --- Helper: Smart Column Mapper ---
 def smart_map_columns(df):
@@ -178,38 +171,39 @@ if app_mode == "1. Quantitative Forensic Scorecard":
     st.info("Please go to Module 2 to test PDF Extraction.")
 
 # ==========================================
-# MODULE 2: PDF SCANNER (IMPROVED V3)
+# MODULE 2: PDF SCANNER (V4 LINE-BASED)
 # ==========================================
 elif app_mode == "2. Single Company Auto-Analysis (PDF)":
     st.header("⚡ Single Company Deep Dive")
-    st.info("Upload an Annual Report PDF. The tool will scan for Keywords and extract values.")
+    st.info("Upload an Annual Report PDF. The tool will scan line-by-line for keywords.")
     
     pdf_file = st.file_uploader("Upload Annual Report", type=["pdf"])
     
     if pdf_file:
-        with st.spinner("Scanning PDF tables... (Using Wide-Net Search)"):
+        with st.spinner("Scanning PDF... (Line Mode)"):
             text = extract_pdf_text(pdf_file)
             
             # --- DEBUG VIEW ---
             with st.expander("🛠️ Debug: View Raw Extracted Text"):
-                st.text(text[:5000]) # Show first 5000 chars for user to check
+                st.text(text[:5000]) 
             
-            # --- IMPROVED KEYWORD LIST ---
+            # --- EXPANDED KEYWORD LIST ---
+            # Order matters: Most specific first!
             detected = {
                 'Company': ['Detected Company'], 
-                'Pledge_Pct': [find_value_in_text(text, ['Shares Pledged', 'Encumbered', 'Promoter Pledge'])],
-                'Sales': [find_value_in_text(text, ['Revenue from Operations', 'Total Income', 'Sale of Products', 'Turnover'])],
-                'Receivables': [find_value_in_text(text, ['Trade Receivables', 'Current Trade Receivables', 'Debtors'])],
-                'Inventory': [find_value_in_text(text, ['Inventories', 'Stock-in-trade'])],
+                'Pledge_Pct': [find_value_in_text(text, ['Promoter Shareholding Pledged', 'Shares Pledged', 'Encumbered', 'Pledge'])],
+                'Sales': [find_value_in_text(text, ['Revenue from Operations', 'Total Revenue', 'Total Income', 'Sale of Products', 'Turnover'])],
+                'Receivables': [find_value_in_text(text, ['Trade Receivables', 'Current Trade Receivables', 'Bill Receivables', 'Debtors'])],
+                'Inventory': [find_value_in_text(text, ['Total Inventories', 'Inventories', 'Stock-in-trade', 'Finished goods'])],
                 'CFO': [find_value_in_text(text, ['Net Cash from Operating', 'Net cash generated from operating', 'Cash flow from operating'])],
-                'EBITDA': [find_value_in_text(text, ['EBITDA', 'Profit before tax', 'Operating Profit'])],
-                'Total_Assets': [find_value_in_text(text, ['Total Assets', 'Total Equity and Liabilities'])],
-                'Non_Current_Assets': [find_value_in_text(text, ['Non-current assets', 'Total Non-Current Assets'])],
-                'RPT_Vol': [find_value_in_text(text, ['Related Party', 'RPT'])]
+                'EBITDA': [find_value_in_text(text, ['EBITDA', 'Profit before tax', 'Operating Profit', 'PBIT'])],
+                'Total_Assets': [find_value_in_text(text, ['Total Assets', 'Total Equity and Liabilities', 'Balance Sheet Total'])],
+                'Non_Current_Assets': [find_value_in_text(text, ['Total Non-Current Assets', 'Non-current assets', 'Fixed Assets'])],
+                'RPT_Vol': [find_value_in_text(text, ['Related Party Transactions', 'Related Party', 'RPT'])]
             }
             
             st.success("Extraction Complete! Verify numbers below.")
-            st.caption("ℹ️ Note: If values are 0, the PDF format might be image-based or tables are too complex. Please type manually.")
+            st.caption("ℹ️ If numbers are still 0, the PDF layout might be too complex or image-based. Please enter manually.")
             
             # Allow user to edit
             verified_df = st.data_editor(pd.DataFrame(detected))
