@@ -18,7 +18,9 @@ st.markdown("**Methodology:** Adaptive grouping (Binary vs Traffic Light) with A
 # --- Sidebar ---
 with st.sidebar:
     st.header("⚙️ Control Panel")
-    app_mode = st.selectbox("Select Module", [
+    
+    # CHANGED: Use Radio buttons instead of Selectbox for visibility
+    app_mode = st.radio("Select Module", [
         "1. Quantitative Forensic Scorecard",
         "2. Single Company Auto-Analysis (PDF)",
         "3. Qualitative Sentiment Scanner"
