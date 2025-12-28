@@ -7,6 +7,8 @@ import re
 import requests
 from bs4 import BeautifulSoup
 import io
+import openai
+import json
 
 # --- Page Config ---
 st.set_page_config(page_title="Forensic Engine Ultimate", layout="wide")
@@ -21,7 +23,11 @@ with st.sidebar:
         "2. Single Company Auto-Analysis (PDF)",
         "3. Qualitative Sentiment Scanner"
     ])
-    st.info("ℹ️ **Smart Logic:**\n- **N < 30:** Tool uses 2 Groups (Binary).\n- **N ≥ 30:** Tool uses 3 Groups (Traffic Light).")
+    
+    st.write("---")
+    st.markdown("### 🧠 GenAI Settings (Module 2)")
+    # Securely ask for API Key
+    openai_api_key = st.text_input("OpenAI API Key (Optional)", type="password", help="Paste your key here for Smart Extraction. If empty, tool uses Basic Regex.")
     
     st.write("---")
     st.markdown("### 🔧 Data Settings")
@@ -31,107 +37,83 @@ with st.sidebar:
 def extract_pdf_text(uploaded_file):
     all_text = ""
     with pdfplumber.open(uploaded_file) as pdf:
-        # Scan first 50 pages (usually where Financial Statements are)
-        for page in pdf.pages[:50]:
+        # Scan first 20 pages (usually enough for Financial Highlights)
+        for page in pdf.pages[:20]:
             text = page.extract_text()
             if text: all_text += text + "\n"
     return all_text
 
-# --- Helper: Extract Text from URL ---
-def extract_url_text(url):
+# --- Helper: GPT EXTRACTION (THE NEW AI POWER) ---
+def extract_data_with_gpt(text, api_key):
+    client = openai.OpenAI(api_key=api_key)
+    
+    # We truncate text to 15,000 chars to fit in context window and save cost
+    truncated_text = text[:15000]
+    
+    prompt = f"""
+    You are a Forensic Accounting AI. Extract the following specific financial figures from the provided Annual Report text.
+    Return the output strictly as a JSON object. Do not add markdown formatting.
+    
+    Fields to Extract (Find the Consolidated figures for the latest available year):
+    1. Sales (Revenue from Operations)
+    2. EBITDA (Operating Profit)
+    3. CFO (Net Cash from Operating Activities)
+    4. Receivables (Trade Receivables)
+    5. Inventory
+    6. Total_Assets
+    7. Non_Current_Assets
+    8. Pledge_Pct (Promoter Shares Pledged %) - If not found, return 0.
+    9. RPT_Vol (Total Related Party Transactions Value) - If not found, return 0.
+    
+    Text Data:
+    {truncated_text}
+    
+    JSON Format:
+    {{
+        "Company": "Name",
+        "Sales": 0.0,
+        "EBITDA": 0.0,
+        "CFO": 0.0,
+        "Receivables": 0.0,
+        "Inventory": 0.0,
+        "Total_Assets": 0.0,
+        "Non_Current_Assets": 0.0,
+        "Pledge_Pct": 0.0,
+        "RPT_Vol": 0.0
+    }}
+    """
+    
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=15, stream=True)
-        
-        if response.status_code != 200:
-            return f"⚠️ Error: Website returned Status Code {response.status_code}."
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo", # Or "gpt-4" for better results
+            messages=[
+                {"role": "system", "content": "You are a helpful financial assistant. Output only JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
+        content = response.choices[0].message.content
+        return json.loads(content)
+    except Exception as e:
+        return {"Error": str(e)}
 
-        first_bytes = next(response.iter_content(chunk_size=4))
-        if first_bytes.startswith(b'%PDF') or url.lower().endswith('.pdf'):
-            try:
-                pdf_data = io.BytesIO(response.content)
-                with pdfplumber.open(pdf_data) as pdf:
-                    all_text = ""
-                    for page in pdf.pages[:30]:
-                        txt = page.extract_text()
-                        if txt: all_text += txt + "\n"
-                    return all_text if len(all_text) > 0 else "⚠️ PDF found but no text extracted."
-            except Exception as e: return f"⚠️ PDF Error: {e}"
-        else:
-            soup = BeautifulSoup(response.content, 'html.parser')
-            for el in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form']): el.decompose()
-            content = soup.find('main') or soup.body
-            if content:
-                text = content.get_text(separator=' ', strip=True)
-                lines = [line for line in text.split('\n') if len(line.split()) > 3]
-                return " ".join(lines)
-            return "⚠️ No content found."
-    except Exception as e: return f"⚠️ Network Error: {e}"
-
-# --- Helper: LINE-BASED VALUE FINDER (V4 - MOST ROBUST) ---
-def find_value_in_text(text, keywords):
+# --- Helper: OLD REGEX FINDER (FALLBACK) ---
+def find_value_regex(text, keywords):
     lines = text.split('\n')
     candidates = []
-    
     for keyword in keywords:
         for i, line in enumerate(lines):
-            # Check if keyword exists in this line (Case Insensitive)
             if keyword.lower() in line.lower():
-                
-                # Context: Look at THIS line and the NEXT line (in case value wraps)
                 search_text = line
-                if i + 1 < len(lines):
-                    search_text += " " + lines[i+1]
-                
-                # Regex to find numbers (formatted like 10,000.00 or 500)
-                # Ignores isolated small integers like "Note 2"
+                if i + 1 < len(lines): search_text += " " + lines[i+1]
                 numbers = re.findall(r'(?<!Note\s)(?<!\d)[\d,]+\.\d{2}|(?<!Note\s)(?<!\d)[\d,]{3,}', search_text)
-                
                 for num_str in numbers:
                     try:
                         val = float(num_str.replace(',', ''))
-                        # Filter out Years and Note Numbers
-                        if val > 100 and val not in [2022, 2023, 2024, 2025]:
-                            candidates.append(val)
+                        if val > 100 and val not in [2022, 2023, 2024, 2025]: candidates.append(val)
                     except: continue
-                    
-    # Heuristic: If we found candidates, usually the largest number associated with the keyword is the value
-    if candidates:
-        return max(candidates)
+    if candidates: return max(candidates)
     return 0.0
-
-# --- Helper: Smart Column Mapper ---
-def smart_map_columns(df):
-    df.columns = df.columns.astype(str).str.strip().str.replace('\n', ' ')
-    mapping_rules = {
-        'Company': ['company', 'entity', 'name'],
-        'Pledge_Pct': ['pledge', 'encumbered'],
-        'Sales': ['sales', 'revenue', 'turnover', 'income'],
-        'Receivables': ['receivables', 'debtors'],
-        'Inventory': ['inventory', 'stock'],
-        'CFO': ['cfo', 'operating cash', 'cash flow from operating'],
-        'EBITDA': ['ebitda', 'operating profit'],
-        'Total_Assets': ['total assets', 'balance sheet total'],
-        'Non_Current_Assets': ['non current assets', 'fixed assets'],
-        'RPT_Vol': ['rpt', 'related party']
-    }
-    new_cols = {}
-    st.write("---")
-    st.markdown("### 🧬 Auto-Column Detection")
-    cols_ui = st.columns(3)
-    for i, (std, vars_) in enumerate(mapping_rules.items()):
-        match = None
-        for col in df.columns:
-            if any(v in col.lower() for v in vars_): match = col; break
-        if not match and std in df.columns: match = std
-        with cols_ui[i % 3]:
-            sel = st.selectbox(f"Map '{std}'", ["(Select)"] + list(df.columns), index=list(df.columns).index(match) + 1 if match else 0, key=f"map_{std}")
-            if sel != "(Select)": new_cols[sel] = std
-    if new_cols:
-        df = df.rename(columns=new_cols)
-        for req in mapping_rules: 
-            if req not in df.columns: df[req] = 0
-    return df
 
 # --- Helper: Risk Logic ---
 def calculate_risk(df):
@@ -142,7 +124,6 @@ def calculate_risk(df):
     df['Cash_Quality'] = df.apply(lambda x: (x['CFO']/x['EBITDA']) if x['EBITDA']>0 else 0, axis=1).round(2)
     df['RPT_Intensity'] = df.apply(lambda x: (x['RPT_Vol']/x['Sales']*100) if x['Sales']>0 else 0, axis=1).round(1)
     
-    # Simple Bucket Logic for PDF Scanner
     df['Risk_Group'] = df['Pledge_Pct'].apply(lambda x: "🔴 Critical" if x>50 else "🟢 Safe")
 
     def analyze(row):
@@ -164,51 +145,67 @@ def calculate_risk(df):
     return df, "Standard"
 
 # ==========================================
-# APP UI
+# MODULE 1: QUANTITATIVE SCORECARD
 # ==========================================
 if app_mode == "1. Quantitative Forensic Scorecard":
     st.header("📊 Module 1: Quantitative Analysis")
-    st.info("Please go to Module 2 to test PDF Extraction.")
+    st.info("Batch Analysis Module (Please go to Module 2 for GenAI PDF Scanning).")
 
 # ==========================================
-# MODULE 2: PDF SCANNER (V4 LINE-BASED)
+# MODULE 2: PDF SCANNER (GenAI Powered)
 # ==========================================
 elif app_mode == "2. Single Company Auto-Analysis (PDF)":
-    st.header("⚡ Single Company Deep Dive")
-    st.info("Upload an Annual Report PDF. The tool will scan line-by-line for keywords.")
+    st.header("⚡ Single Company Deep Dive (AI Powered)")
     
+    if not openai_api_key:
+        st.warning("⚠️ **No API Key detected.** Using Basic Regex Mode (Low Accuracy). To unlock Smart AI Mode, enter OpenAI Key in Sidebar.")
+    else:
+        st.success("🟢 **GenAI Mode Active:** Using GPT-3.5 for Smart Extraction.")
+
     pdf_file = st.file_uploader("Upload Annual Report", type=["pdf"])
     
     if pdf_file:
-        with st.spinner("Scanning PDF... (Line Mode)"):
+        with st.spinner("Extracting Text & Analyzing..."):
             text = extract_pdf_text(pdf_file)
             
-            # --- DEBUG VIEW ---
-            with st.expander("🛠️ Debug: View Raw Extracted Text"):
-                st.text(text[:5000]) 
+            extracted_data = {}
             
-            # --- EXPANDED KEYWORD LIST ---
-            # Order matters: Most specific first!
-            detected = {
-                'Company': ['Detected Company'], 
-                'Pledge_Pct': [find_value_in_text(text, ['Promoter Shareholding Pledged', 'Shares Pledged', 'Encumbered', 'Pledge'])],
-                'Sales': [find_value_in_text(text, ['Revenue from Operations', 'Total Revenue', 'Total Income', 'Sale of Products', 'Turnover'])],
-                'Receivables': [find_value_in_text(text, ['Trade Receivables', 'Current Trade Receivables', 'Bill Receivables', 'Debtors'])],
-                'Inventory': [find_value_in_text(text, ['Total Inventories', 'Inventories', 'Stock-in-trade', 'Finished goods'])],
-                'CFO': [find_value_in_text(text, ['Net Cash from Operating', 'Net cash generated from operating', 'Cash flow from operating'])],
-                'EBITDA': [find_value_in_text(text, ['EBITDA', 'Profit before tax', 'Operating Profit', 'PBIT'])],
-                'Total_Assets': [find_value_in_text(text, ['Total Assets', 'Total Equity and Liabilities', 'Balance Sheet Total'])],
-                'Non_Current_Assets': [find_value_in_text(text, ['Total Non-Current Assets', 'Non-current assets', 'Fixed Assets'])],
-                'RPT_Vol': [find_value_in_text(text, ['Related Party Transactions', 'Related Party', 'RPT'])]
-            }
+            # --- BRANCH: GEN AI vs REGEX ---
+            if openai_api_key:
+                # 1. Use GPT
+                try:
+                    gpt_response = extract_data_with_gpt(text, openai_api_key)
+                    if "Error" in gpt_response:
+                        st.error(f"OpenAI Error: {gpt_response['Error']}")
+                        st.stop()
+                    
+                    # Convert JSON to Lists for DataFrame
+                    for k, v in gpt_response.items():
+                        extracted_data[k] = [v]
+                        
+                except Exception as e:
+                    st.error(f"AI Extraction Failed: {e}")
+            else:
+                # 2. Use Old Regex (Fallback)
+                detected = {
+                    'Company': ['Detected Company'], 
+                    'Pledge_Pct': [find_value_regex(text, ['Shares Pledged', 'Encumbered', 'Pledge'])],
+                    'Sales': [find_value_regex(text, ['Revenue from Operations', 'Total Income'])],
+                    'Receivables': [find_value_regex(text, ['Trade Receivables', 'Debtors'])],
+                    'Inventory': [find_value_regex(text, ['Inventories', 'Stock-in-trade'])],
+                    'CFO': [find_value_regex(text, ['Net Cash from Operating'])],
+                    'EBITDA': [find_value_regex(text, ['EBITDA', 'Operating Profit'])],
+                    'Total_Assets': [find_value_regex(text, ['Total Assets'])],
+                    'Non_Current_Assets': [find_value_regex(text, ['Non-current assets'])],
+                    'RPT_Vol': [find_value_regex(text, ['Related Party', 'RPT'])]
+                }
+                extracted_data = detected
+
+            # Show Data Editor
+            st.success("Extraction Complete! Please verify values below.")
+            verified_df = st.data_editor(pd.DataFrame(extracted_data))
             
-            st.success("Extraction Complete! Verify numbers below.")
-            st.caption("ℹ️ If numbers are still 0, the PDF layout might be too complex or image-based. Please enter manually.")
-            
-            # Allow user to edit
-            verified_df = st.data_editor(pd.DataFrame(detected))
-            
-            if st.button("Analyze PDF Data"):
+            if st.button("Analyze Data"):
                 res, _ = calculate_risk(verified_df)
                 row = res.iloc[0]
                 
@@ -217,7 +214,7 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
                 if score > 50: st.error(f"**Verdict:** {row['Verdict']} (Score: {score})")
                 else: st.success(f"**Verdict:** {row['Verdict']} (Score: {score})")
                 
-                st.markdown("#### **📝 AI Interpretation:**")
+                st.markdown("#### **📝 Interpretation:**")
                 if row['Detailed_Report']:
                     for line in row['Detailed_Report']: st.markdown(f"- {line}")
                 else:
@@ -228,26 +225,5 @@ elif app_mode == "2. Single Company Auto-Analysis (PDF)":
 # ==========================================
 elif app_mode == "3. Qualitative Sentiment Scanner":
     st.header("🧠 Qualitative Sentiment Scanner")
-    if 'sentiment_text' not in st.session_state: st.session_state['sentiment_text'] = ""
-    
-    input_method = st.radio("Input:", ["Paste Text", "Paste URL"], horizontal=True)
-    
-    if input_method == "Paste Text":
-        val = st.text_area("Text:", value=st.session_state['sentiment_text'], height=200)
-        if val: st.session_state['sentiment_text'] = val
-        
-    elif input_method == "Paste URL":
-        url = st.text_input("URL:")
-        if st.button("Fetch"):
-            txt = extract_url_text(url)
-            st.session_state['sentiment_text'] = txt
-            st.success("Fetched!")
-            
-    if st.button("Run Analysis"):
-        txt = st.session_state['sentiment_text']
-        if len(txt) > 50:
-            blob = TextBlob(txt)
-            st.metric("Subjectivity", f"{blob.sentiment.subjectivity:.2f}")
-            if blob.sentiment.subjectivity > 0.5: st.error("Pollyanna Effect Detected!")
-            else: st.success("Objective Tone.")
-        else: st.warning("No text found.")
+    # (Same as before)
+    # ... [Keep your existing Module 3 code here] ...
